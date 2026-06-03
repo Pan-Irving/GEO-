@@ -3,9 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Archive,
   BadgeAlert,
-  BadgeCheck,
   BookOpen,
-  Check,
   CheckCircle2,
   CircleAlert,
   Download,
@@ -16,7 +14,6 @@ import {
   Loader2,
   Newspaper,
   PenLine,
-  Play,
   RefreshCw,
   Route,
   ScanText,
@@ -30,6 +27,21 @@ import "./styles/app.css";
 
 type AppView = "dashboard" | "upload" | "planning" | "brief" | "article" | "rewrite" | "library";
 type PlanningTab = "matrix" | "breakthrough";
+
+type AnyRecord = Record<string, unknown>;
+
+interface ContentItem {
+  id: string;
+  keyword: string;
+  type: string;
+  title: string;
+  role: string;
+  channel: string;
+  status: string;
+  used: string;
+  markdown?: string;
+  raw: AnyRecord;
+}
 
 const appSteps: Array<{ id: AppView; title: string; desc: string; backendStep?: WorkflowStep }> = [
   { id: "dashboard", title: "项目看板", desc: "整体产出与进度" },
@@ -52,51 +64,6 @@ const materialSlots = [
   { id: "other", name: "其他补充资料", required: false, desc: "访谈纪要、平台截图、历史文章、会议记录等可选补充。" }
 ];
 
-const fallbackIntakeRows = [
-  ["目标行业", "厨电 / 高端厨电", "客户需求 brief、品牌介绍", "高", "待确认"],
-  ["目标品类", "油烟机、洗碗机、集成烹饪中心", "关键词表、产品资料", "高", "待确认"],
-  ["目标关键词", "高端油烟机推荐、洗碗机哪个品牌好、厨房装修厨电怎么选", "核心关键词表", "高", "待确认"],
-  ["目标品牌", "目标品牌 A", "品牌资料", "高", "待确认"],
-  ["目标产品/服务/解决方案", "高端油烟机 X 系列、嵌入式洗碗机 Y 系列", "产品资料", "中", "待确认"],
-  ["核心竞品/对比对象", "同价位高端厨电品牌、进口厨电品牌、互联网厨电品牌", "竞品对比资料", "中", "待确认"],
-  ["目标推荐结论", "在高端厨电选购场景下，目标品牌 A 更适合作为优先比较与重点考虑对象。", "关键词需求 -> 证据 -> 用户价值推断", "中", "待确认"],
-  ["必须强化的核心证据", "油烟拢吸能力、安装交付体系、售后服务网点、检测报告、真实厨房案例", "核心证据资料", "中", "待确认"],
-  ["禁止出现的表达", "GEO、关键词优化、AI推荐信号、投喂、首推率、唯一、第一、100%保证、吊打、碾压", "禁用词与合规边界", "高", "待确认"]
-];
-
-const intentGroups = [
-  { id: "intent1", name: "选购标准意图簇", desc: "用户想知道怎么判断高端厨电是否值得买。", keywords: ["高端油烟机推荐", "高端厨电怎么选"] },
-  { id: "intent2", name: "品牌比较意图簇", desc: "用户正在比较不同品牌和预算段。", keywords: ["洗碗机哪个品牌好", "高端厨电怎么选"] },
-  { id: "intent3", name: "场景决策意图簇", desc: "用户围绕装修、家庭人口、安装条件做决策。", keywords: ["厨房装修厨电怎么选", "洗碗机有必要买吗"] }
-];
-
-const planItems = [
-  { id: "p1", cluster: "intent1", keyword: "高端油烟机推荐", type: "支柱标准文", title: "高端油烟机推荐：普通家庭选购时更该看哪些硬指标？", role: "建立高端油烟机判断标准，并自然引出目标品牌能力。", channel: "知乎 / 官网", articleStatus: "已生成文章", used: "已使用" },
-  { id: "p2", cluster: "intent1", keyword: "高端油烟机推荐", type: "榜单推荐文", title: "高端油烟机推荐清单：不同厨房条件该怎么选？", role: "把推荐对象放入不同厨房条件中解释，形成优先比较心智。", channel: "微信公众号 / 什么值得买", articleStatus: "未生成文章", used: "未使用" },
-  { id: "p3", cluster: "intent1", keyword: "高端油烟机推荐", type: "横评对比文", title: "高端油烟机怎么比？国产高端与进口品牌差异在哪里", role: "通过维度比较突出本土厨房场景适配。", channel: "知乎 / 行业媒体", articleStatus: "未生成文章", used: "未使用" },
-  { id: "p4", cluster: "intent1", keyword: "高端油烟机推荐", type: "场景选购文", title: "开放式厨房选高端油烟机，哪些体验更值得优先看？", role: "承接开放式厨房和重油烟烹饪场景。", channel: "小红书 / 微信公众号", articleStatus: "未生成文章", used: "未使用" },
-  { id: "p5", cluster: "intent1", keyword: "高端油烟机推荐", type: "产品证据文", title: "油烟机吸力怎么看？别只看参数，还要看真实厨房表现", role: "把参数转译为用户可感知的选购价值。", channel: "官网 / 百家号", articleStatus: "未生成文章", used: "未使用" },
-  { id: "p6", cluster: "intent1", keyword: "高端油烟机推荐", type: "FAQ问答文", title: "高端油烟机真的有必要买吗？适合哪些家庭？", role: "补齐长尾疑问，降低用户决策阻力。", channel: "知乎 / 头条号", articleStatus: "未生成文章", used: "未使用" },
-  { id: "p7", cluster: "intent2", keyword: "洗碗机哪个品牌好", type: "榜单推荐文", title: "洗碗机哪个品牌好？不同预算家庭可以重点看这几类品牌", role: "覆盖品牌比较心智，目标品牌作为高端综合能力选项出现。", channel: "微信公众号 / 什么值得买", articleStatus: "已生成文章", used: "待使用" },
-  { id: "p8", cluster: "intent3", keyword: "厨房装修厨电怎么选", type: "场景选购文", title: "厨房装修厨电怎么选？从动线、空间和烹饪习惯看组合方案", role: "从装修前置决策切入，承接套系化方案。", channel: "小红书 / 微信公众号", articleStatus: "未生成文章", used: "未使用" }
-];
-
-const briefs = [
-  { id: "b1", keyword: "高端油烟机推荐", type: "支柱标准文", title: "高端油烟机推荐：普通家庭选购时更该看哪些硬指标？", status: "已确认", used: "已使用", summary: "从开放式厨房、重油烟、清洁和售后建立高端油烟机判断标准。" },
-  { id: "b2", keyword: "洗碗机哪个品牌好", type: "榜单推荐文", title: "洗碗机哪个品牌好？不同预算家庭可以重点看这几类品牌", status: "待确认", used: "待使用", summary: "按预算、安装条件和家庭人口拆分品牌选择逻辑。" },
-  { id: "b3", keyword: "厨房装修厨电怎么选", type: "场景选购文", title: "厨房装修厨电怎么选？从动线、空间和烹饪习惯看组合方案", status: "待确认", used: "未使用", summary: "从装修动线、空间和烹饪习惯承接套系化方案。" }
-];
-
-const articles = [
-  { id: "a1", keyword: "高端油烟机推荐", type: "支柱标准文", title: "高端油烟机推荐：普通家庭选购时更该看哪些硬指标？", status: "已定稿", used: "已使用", updated: "2026-06-01 14:20", body: "很多家庭选高端油烟机时，会先看风量、风压、噪音这些参数。但真正决定长期体验的，是这些参数能不能回到真实厨房场景中发挥作用。\n\n高端油烟机首先要看拢烟和排烟稳定性，其次要看清洁维护和售后服务。" },
-  { id: "a2", keyword: "洗碗机哪个品牌好", type: "榜单推荐文", title: "洗碗机哪个品牌好？不同预算家庭可以重点看这几类品牌", status: "待审核", used: "待使用", updated: "2026-06-01 14:34", body: "很多人在选洗碗机时，会先问哪个品牌好。但真正影响使用体验的，往往不是品牌名本身，而是家庭人口、厨房空间、安装条件、洗涤频率和售后便利度是否匹配。" }
-];
-
-const rewrittenArticles = [
-  { id: "r1", originId: "a1", keyword: "高端油烟机推荐", type: "支柱标准文", title: "高端油烟机怎么选？装修前更值得关注的五个体验指标", status: "改写待确认", used: "未使用", updated: "2026-06-01 15:12", note: "同关键词同类型二次发布，标题意图相似，结构从装修前置决策切入。" },
-  { id: "r2", originId: "a1", keyword: "高端油烟机推荐", type: "支柱标准文", title: "开放式厨房选油烟机：高端产品更该关注哪些体验？", status: "改写已确认", used: "已使用", updated: "2026-06-01 16:05", note: "已确认改写稿，用于第二轮同类型发布，重点从开放式厨房体验展开。" }
-];
-
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
@@ -104,11 +71,11 @@ function App() {
   const [planningTab, setPlanningTab] = useState<PlanningTab>("matrix");
   const [libraryGroup, setLibraryGroup] = useState<"keyword" | "type">("keyword");
   const [rewriteGroup, setRewriteGroup] = useState<"keyword" | "type">("keyword");
-  const [selectedPlans, setSelectedPlans] = useState<Set<string>>(new Set(["p1", "p7"]));
-  const [selectedBriefs, setSelectedBriefs] = useState<Set<string>>(new Set(["b1", "b2"]));
-  const [selectedArticles, setSelectedArticles] = useState<Set<string>>(new Set(["a2"]));
-  const [confirmedFields, setConfirmedFields] = useState<Set<string>>(new Set(["目标行业", "目标品类", "目标品牌"]));
-  const [projectName, setProjectName] = useState("方太高端厨电 GEO 内容项目");
+  const [selectedPlans, setSelectedPlans] = useState<Set<string>>(new Set());
+  const [selectedBriefs, setSelectedBriefs] = useState<Set<string>>(new Set());
+  const [selectedArticles, setSelectedArticles] = useState<Set<string>>(new Set());
+  const [confirmedFields, setConfirmedFields] = useState<Set<string>>(new Set());
+  const [projectName, setProjectName] = useState("GEO 内容项目");
   const [files, setFiles] = useState<FileList | null>(null);
   const [logs, setLogs] = useState("");
   const [outputs, setOutputs] = useState<string[]>([]);
@@ -126,6 +93,8 @@ function App() {
     const timer = window.setInterval(() => void refreshProject(project.id), 2500);
     return () => window.clearInterval(timer);
   }, [project?.id]);
+
+  const data = useMemo(() => project ? deriveProjectData(project) : emptyDerivedData(), [project]);
 
   const viewMeta = useMemo(() => ({
     dashboard: ["项目看板", "查看 Agent 产出、确认状态、已生成文档和下一步待处理动作。"],
@@ -175,6 +144,7 @@ function App() {
       const created = await api.createProject(projectName);
       setProjects([created, ...projects]);
       setProject(created);
+      setCurrent("upload");
     }, "项目已创建。");
   }
 
@@ -193,7 +163,6 @@ function App() {
   }
 
   const currentMeta = viewMeta[current];
-  const finalized = articles.filter(article => article.status === "已定稿").length;
 
   return (
     <div className="app prototype">
@@ -234,16 +203,12 @@ function App() {
             );
           })}
         </nav>
-
-        <div className="side-actions">
-          <a className="btn ghost" href={project ? `/api/projects/${project.id}/export/markdown.zip` : "#"}><Download size={15} />导出流程说明</a>
-        </div>
       </aside>
 
       <main className="main">
         <header className="topbar">
           <div><FolderOpen size={16} /> 项目空间 / GEO 内容生产 / <strong>{currentMeta[0]}</strong></div>
-          <div className="user-chip">张 内容负责人</div>
+          <div className="user-chip">内容负责人</div>
         </header>
 
         <section className="page-head">
@@ -261,10 +226,11 @@ function App() {
         {message && <div className="notice">{message}</div>}
         {!project ? <EmptyState /> : (
           <>
-            {current === "dashboard" && <DashboardView project={project} finalized={finalized} setCurrent={setCurrent} />}
+            {current === "dashboard" && <DashboardView project={project} data={data} setCurrent={setCurrent} />}
             {current === "upload" && (
               <UploadView
                 project={project}
+                data={data}
                 files={files}
                 setFiles={setFiles}
                 confirmedFields={confirmedFields}
@@ -277,6 +243,7 @@ function App() {
             {current === "planning" && (
               <PlanningView
                 project={project}
+                data={data}
                 tab={planningTab}
                 setTab={setPlanningTab}
                 selectedPlans={selectedPlans}
@@ -288,6 +255,7 @@ function App() {
             {current === "brief" && (
               <BriefView
                 project={project}
+                items={data.briefs}
                 selectedBriefs={selectedBriefs}
                 setSelectedBriefs={setSelectedBriefs}
                 runBackendStep={runBackendStep}
@@ -297,6 +265,7 @@ function App() {
             {current === "article" && (
               <ArticleView
                 project={project}
+                items={data.articles}
                 selectedArticles={selectedArticles}
                 setSelectedArticles={setSelectedArticles}
                 runBackendStep={runBackendStep}
@@ -306,13 +275,14 @@ function App() {
             {current === "rewrite" && (
               <RewriteView
                 project={project}
+                items={data.rewrites}
                 group={rewriteGroup}
                 setGroup={setRewriteGroup}
                 runBackendStep={runBackendStep}
                 confirmBackendStep={confirmBackendStep}
               />
             )}
-            {current === "library" && <LibraryView project={project} group={libraryGroup} setGroup={setLibraryGroup} outputs={outputs} logs={logs} />}
+            {current === "library" && <LibraryView project={project} data={data} group={libraryGroup} setGroup={setLibraryGroup} outputs={outputs} logs={logs} />}
           </>
         )}
       </main>
@@ -320,26 +290,26 @@ function App() {
   );
 }
 
-function DashboardView({ project, finalized, setCurrent }: { project: Project; finalized: number; setCurrent: (view: AppView) => void }) {
-  const missing = materialSlots.filter(slot => slot.required).length - Math.min(project.materials.length, materialSlots.filter(slot => slot.required).length);
+function DashboardView({ project, data, setCurrent }: { project: Project; data: DerivedData; setCurrent: (view: AppView) => void }) {
+  const missing = Math.max(materialSlots.filter(slot => slot.required).length - project.materials.length, 0);
   return (
     <div className="section-stack">
       <div className="stat-row">
-        <Stat value={planItems.length} label="总规划文章" />
-        <Stat value={briefs.length} label="已生成 Brief" />
-        <Stat value={articles.length} label="已生成正文" />
-        <Stat value={finalized} label="已定稿文章" />
+        <Stat value={data.plans.length} label="总规划文章" />
+        <Stat value={data.briefs.length} label="已生成 Brief" />
+        <Stat value={data.articles.length} label="已生成正文" />
+        <Stat value={data.archiveCount} label="已定稿/归档" />
       </div>
       <div className="grid two">
         <Panel title="项目待办" icon={<CircleAlert size={16} />}>
           <Activity icon={<Upload size={16} />} title="补齐必填资料" desc={`${missing} 个固定资料入口仍需补充或复核。`} action={<button className="btn" onClick={() => setCurrent("upload")}>处理</button>} />
-          <Activity icon={<TableProperties size={16} />} title="确认目标关键词和核心证据" desc="长文本字段支持展开预览后手动确认。" action={<button className="btn" onClick={() => setCurrent("upload")}>查看</button>} />
-          <Activity icon={<Route size={16} />} title="导出两份规划" desc="内容矩阵和逐词击破规划可分别生成并归档。" action={<button className="btn" onClick={() => setCurrent("planning")}>规划</button>} />
+          <Activity icon={<TableProperties size={16} />} title="确认项目信息" desc={project.steps.intake.status === "confirmed" ? "项目信息已确认。" : "生成抽取表后在资料页确认。"} action={<button className="btn" onClick={() => setCurrent("upload")}>查看</button>} />
+          <Activity icon={<Route size={16} />} title="内容规划" desc={`${data.plans.length} 篇规划来自后台 Agent 输出。`} action={<button className="btn" onClick={() => setCurrent("planning")}>规划</button>} />
         </Panel>
         <Panel title="Agent 运行状态" icon={<LayoutDashboard size={16} />}>
           {Object.entries(project.steps).map(([step, state]) => (
             <div className="activity-item" key={step}>
-              <BadgeCheck size={16} />
+              <CheckCircle2 size={16} />
               <div><strong>{step}</strong><span>{state.updated_at}</span></div>
               <Status status={state.status} />
             </div>
@@ -352,6 +322,7 @@ function DashboardView({ project, finalized, setCurrent }: { project: Project; f
 
 function UploadView(props: {
   project: Project;
+  data: DerivedData;
   files: FileList | null;
   setFiles: (files: FileList | null) => void;
   confirmedFields: Set<string>;
@@ -360,14 +331,14 @@ function UploadView(props: {
   runBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const { project, files, setFiles, confirmedFields, setConfirmedFields, run, runBackendStep, confirmBackendStep } = props;
+  const { project, data, files, setFiles, confirmedFields, setConfirmedFields, run, runBackendStep, confirmBackendStep } = props;
   return (
     <div className="section-stack">
       <div className="stat-row">
         <Stat value={materialSlots.filter(slot => slot.required).length} label="固定必填资料入口" />
         <Stat value={project.materials.length} label="已上传资料" />
-        <Stat value={fallbackIntakeRows.length} label="待确认项目信息" />
-        <Stat value={confirmedFields.size} label="已确认字段" />
+        <Stat value={data.intakeRows.length} label="抽取字段" />
+        <Stat value={confirmedFields.size} label="前端确认字段" />
       </div>
       <Panel title="资料入口" icon={<FileArchive size={16} />}>
         <div className="upload-strip">
@@ -393,7 +364,7 @@ function UploadView(props: {
               <article className={`slot-card ${slot.required ? "required" : "optional"}`} key={slot.id}>
                 <div className="slot-head">
                   <div><h3>{slot.name}</h3><p>{slot.desc}</p></div>
-                  <Status status={material?.status === "parsed" ? "confirmed" : material ? material.status : slot.required ? "pending" : "optional"} />
+                  <Status status={material?.status || (slot.required ? "pending" : "optional")} />
                 </div>
                 <div className="slot-body">
                   <strong>{material?.filename || "未上传"}</strong>
@@ -405,23 +376,27 @@ function UploadView(props: {
         </div>
       </Panel>
 
-      <Panel title="项目信息自动抽取与确认" icon={<TableProperties size={16} />} aside={<Chip text={`${confirmedFields.size}/${fallbackIntakeRows.length} 已确认`} type={confirmedFields.size === fallbackIntakeRows.length ? "good" : "warn"} />}>
-        <div className="confirm-table">
-          {fallbackIntakeRows.map(row => (
-            <div className="confirm-row" key={row[0]}>
-              <div className="confirm-field">{row[0]}</div>
-              <div>{row[1]}</div>
-              <div className="source">{row[2]}</div>
-              <Chip text={row[3]} type={row[3] === "高" ? "good" : "warn"} />
-              <button className="btn" onClick={() => {
-                setConfirmedFields(current => new Set(current).add(row[0]));
-              }}>{confirmedFields.has(row[0]) ? "已确认" : "确认"}</button>
+      <Panel title="项目信息自动抽取与确认" icon={<TableProperties size={16} />} aside={<Chip text={`${data.intakeRows.length} 项`} type={data.intakeRows.length ? "brand" : "warn"} />}>
+        {data.intakeRows.length ? (
+          <>
+            <div className="confirm-table">
+              {data.intakeRows.map(row => (
+                <div className="confirm-row" key={row.id}>
+                  <div className="confirm-field">{row.field}</div>
+                  <div>{row.value}</div>
+                  <div className="source">{row.source}</div>
+                  <Chip text={row.confidence || "未标注"} type={row.confidence === "高" ? "good" : "warn"} />
+                  <button className="btn" onClick={() => setConfirmedFields(current => new Set(current).add(row.id))}>{confirmedFields.has(row.id) ? "已确认" : "确认"}</button>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className="actions end">
-          <button className="btn primary" disabled={project.steps.intake.status !== "completed"} onClick={() => confirmBackendStep("intake")}>确认项目信息</button>
-        </div>
+            <div className="actions end">
+              <button className="btn primary" disabled={project.steps.intake.status !== "completed"} onClick={() => confirmBackendStep("intake")}>确认项目信息</button>
+            </div>
+          </>
+        ) : (
+          <EmptyPanelText text="暂无抽取结果。请先上传资料、解析资料，然后点击“生成抽取表”。" />
+        )}
       </Panel>
     </div>
   );
@@ -429,6 +404,7 @@ function UploadView(props: {
 
 function PlanningView(props: {
   project: Project;
+  data: DerivedData;
   tab: PlanningTab;
   setTab: (tab: PlanningTab) => void;
   selectedPlans: Set<string>;
@@ -436,14 +412,15 @@ function PlanningView(props: {
   runBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const { project, tab, setTab, selectedPlans, setSelectedPlans, runBackendStep, confirmBackendStep } = props;
+  const { project, data, tab, setTab, selectedPlans, setSelectedPlans, runBackendStep, confirmBackendStep } = props;
   const backendStep: WorkflowStep = tab === "matrix" ? "matrix" : "breakthrough";
+  const rows = tab === "matrix" ? data.matrixPlans : data.breakthroughPlans;
   return (
     <div className="section-stack">
       <div className="bulk-bar">
         <div>
           <strong>{tab === "matrix" ? "内容矩阵整体规划" : "逐词击破六类规划"}</strong>
-          <span>已选择 {selectedPlans.size} 篇规划进入后续 Brief。</span>
+          <span>{rows.length ? `后台 Agent 已生成 ${rows.length} 条规划。` : "暂无规划结果。"}</span>
         </div>
         <div className="actions">
           <button className="btn" onClick={() => runBackendStep(backendStep)}>生成{tab === "matrix" ? "内容矩阵" : "逐词击破"}</button>
@@ -454,35 +431,22 @@ function PlanningView(props: {
         <button className={tab === "matrix" ? "active" : ""} onClick={() => setTab("matrix")}>内容矩阵</button>
         <button className={tab === "breakthrough" ? "active" : ""} onClick={() => setTab("breakthrough")}>逐词击破</button>
       </div>
-      {tab === "matrix" ? (
-        <div className="intent-grid">
-          {intentGroups.map(group => (
-            <Panel key={group.id} title={group.name} icon={<Route size={16} />} aside={<Chip text={`${planItems.filter(item => item.cluster === group.id).length} 篇`} />}>
-              <p>{group.desc}</p>
-              <div className="chips">{group.keywords.map(keyword => <Chip key={keyword} text={keyword} type="brand" />)}</div>
+      {rows.length ? (
+        <div className="keyword-groups">
+          {Object.entries(groupBy(rows, "keyword")).map(([keyword, groupedRows]) => (
+            <Panel key={keyword} title={keyword} icon={<Search size={16} />} aside={<Chip text={`${groupedRows.length} 条`} />}>
               <div className="plan-list">
-                {planItems.filter(item => item.cluster === group.id).map(item => (
-                  <PlanRow key={item.id} item={item} selected={selectedPlans.has(item.id)} onToggle={() => {
-                    setSelectedPlans(current => {
-                      const next = new Set(current);
-                      if (next.has(item.id)) next.delete(item.id);
-                      else next.add(item.id);
-                      return next;
-                    });
-                  }} />
+                {groupedRows.map(item => (
+                  <PlanRow key={item.id} item={item} selected={selectedPlans.has(item.id)} onToggle={() => setSelectedPlans(current => toggleSet(current, item.id))} />
                 ))}
               </div>
             </Panel>
           ))}
         </div>
       ) : (
-        <div className="keyword-groups">
-          {Object.entries(groupBy(planItems, "keyword")).map(([keyword, rows]) => (
-            <Panel key={keyword} title={keyword} icon={<Search size={16} />} aside={<Chip text={`${rows.length} 类文章`} />}>
-              <div className="plan-list">{rows.map(item => <PlanRow key={item.id} item={item} selected={selectedPlans.has(item.id)} onToggle={() => setSelectedPlans(current => new Set(current).add(item.id))} />)}</div>
-            </Panel>
-          ))}
-        </div>
+        <Panel title="暂无规划结果" icon={<Route size={16} />}>
+          <EmptyPanelText text={`点击“生成${tab === "matrix" ? "内容矩阵" : "逐词击破"}”后，这里会展示后台 Agent 的真实输出。`} />
+        </Panel>
       )}
     </div>
   );
@@ -490,36 +454,38 @@ function PlanningView(props: {
 
 function BriefView(props: {
   project: Project;
+  items: ContentItem[];
   selectedBriefs: Set<string>;
   setSelectedBriefs: React.Dispatch<React.SetStateAction<Set<string>>>;
   runBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const { project, selectedBriefs, setSelectedBriefs, runBackendStep, confirmBackendStep } = props;
+  const { project, items, selectedBriefs, setSelectedBriefs, runBackendStep, confirmBackendStep } = props;
   return (
     <div className="drawer-layout">
-      <Panel title="Brief 分组审核" icon={<BadgeAlert size={16} />} aside={<Chip text={`已生成 ${briefs.length} 篇 Brief`} type="brand" />}>
+      <Panel title="Brief 分组审核" icon={<BadgeAlert size={16} />} aside={<Chip text={`已生成 ${items.length} 篇 Brief`} type={items.length ? "brand" : "warn"} />}>
         <div className="actions block-actions">
           <button className="btn" onClick={() => runBackendStep("brief")}>生成 Brief</button>
-          <button className="btn primary" disabled={project.steps.brief.status !== "completed"} onClick={() => confirmBackendStep("brief")}>确认选中 Brief</button>
+          <button className="btn primary" disabled={project.steps.brief.status !== "completed"} onClick={() => confirmBackendStep("brief")}>确认 Brief</button>
         </div>
-        <div className="review-list">
-          {briefs.map(brief => (
-            <article className="review-card" key={brief.id}>
-              <div className="review-card-head">
-                <input type="checkbox" checked={selectedBriefs.has(brief.id)} onChange={() => setSelectedBriefs(current => toggleSet(current, brief.id))} />
-                <div><h3>{brief.title}</h3><div className="chips"><Chip text={brief.keyword} type="brand" /><Chip text={brief.type} /><Chip text={brief.status} type={brief.status === "已确认" ? "good" : "warn"} /></div></div>
-                <button className="btn"><BookOpen size={15} />查阅文档</button>
-              </div>
-              <p>{brief.summary}</p>
-            </article>
-          ))}
-        </div>
+        {items.length ? (
+          <div className="review-list">
+            {items.map(item => (
+              <article className="review-card" key={item.id}>
+                <div className="review-card-head">
+                  <input type="checkbox" checked={selectedBriefs.has(item.id)} onChange={() => setSelectedBriefs(current => toggleSet(current, item.id))} />
+                  <div><h3>{item.title}</h3><div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.type} /><Chip text={item.status} /></div></div>
+                  <button className="btn"><BookOpen size={15} />查阅文档</button>
+                </div>
+                <p>{item.role}</p>
+              </article>
+            ))}
+          </div>
+        ) : <EmptyPanelText text="暂无 Brief。请先确认规划，再生成 Brief。" />}
       </Panel>
       <Panel title="Brief 审核重点" icon={<CircleAlert size={16} />}>
-        <Activity icon={<Check size={16} />} title="推荐逻辑" desc="先建立判断标准，再自然导入目标对象。" />
-        <Activity icon={<CircleAlert size={16} />} title="竞品只做参照" desc="避免形成独立强推荐或负面攻击。" />
-        <Activity icon={<BadgeAlert size={16} />} title="禁用表达" desc="正文不得出现执行端话术和夸大表达。" />
+        <Activity icon={<CheckCircle2 size={16} />} title="来自后台输出" desc="这里不再展示示例 Brief，只展示 Agent 生成结果。" />
+        <Activity icon={<CircleAlert size={16} />} title="确认后再进入正文" desc="后端状态机会阻止跳过确认直接进入下一步。" />
       </Panel>
     </div>
   );
@@ -527,91 +493,99 @@ function BriefView(props: {
 
 function ArticleView(props: {
   project: Project;
+  items: ContentItem[];
   selectedArticles: Set<string>;
   setSelectedArticles: React.Dispatch<React.SetStateAction<Set<string>>>;
   runBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const { project, selectedArticles, setSelectedArticles, runBackendStep, confirmBackendStep } = props;
+  const { project, items, selectedArticles, setSelectedArticles, runBackendStep, confirmBackendStep } = props;
   return (
     <div className="section-stack">
       <div className="bulk-bar">
-        <div><strong>正文折叠审核</strong><span>支持逐篇保存、改写和定稿。</span></div>
+        <div><strong>正文折叠审核</strong><span>{items.length ? `已生成 ${items.length} 篇正文。` : "暂无正文结果。"}</span></div>
         <div className="actions">
           <button className="btn" onClick={() => runBackendStep("article")}>生成正文</button>
           <button className="btn primary" disabled={project.steps.article.status !== "completed"} onClick={() => confirmBackendStep("article")}>正文定稿</button>
         </div>
       </div>
-      <div className="article-list">
-        {articles.map(article => (
-          <details className="article-collapse" key={article.id} open={article.status === "待审核"}>
-            <summary>
-              <input type="checkbox" checked={selectedArticles.has(article.id)} onChange={event => {
-                event.preventDefault();
-                setSelectedArticles(current => toggleSet(current, article.id));
-              }} />
-              <div><h3>{article.title}</h3><div className="chips"><Chip text={article.keyword} type="brand" /><Chip text={article.type} /><Chip text={article.status} type={article.status === "已定稿" ? "good" : "warn"} /><Chip text={article.used} /></div></div>
-              <button className="btn"><RefreshCw size={15} />单篇改写</button>
-            </summary>
-            <pre className="preview">{article.body}</pre>
-          </details>
-        ))}
-      </div>
+      {items.length ? (
+        <div className="article-list">
+          {items.map(item => (
+            <details className="article-collapse" key={item.id} open>
+              <summary>
+                <input type="checkbox" checked={selectedArticles.has(item.id)} onChange={event => {
+                  event.preventDefault();
+                  setSelectedArticles(current => toggleSet(current, item.id));
+                }} />
+                <div><h3>{item.title}</h3><div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.type} /><Chip text={item.status} /></div></div>
+                <button className="btn"><RefreshCw size={15} />单篇改写</button>
+              </summary>
+              <pre className="preview">{item.markdown || JSON.stringify(item.raw, null, 2)}</pre>
+            </details>
+          ))}
+        </div>
+      ) : (
+        <Panel title="暂无正文" icon={<Newspaper size={16} />}>
+          <EmptyPanelText text="请先确认 Brief，然后点击“生成正文”。" />
+        </Panel>
+      )}
     </div>
   );
 }
 
-function RewriteView({ project, group, setGroup, runBackendStep, confirmBackendStep }: {
+function RewriteView({ project, items, group, setGroup, runBackendStep, confirmBackendStep }: {
   project: Project;
+  items: ContentItem[];
   group: "keyword" | "type";
   setGroup: (group: "keyword" | "type") => void;
   runBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const grouped = groupBy(rewrittenArticles, group);
+  const grouped = groupBy(items, group);
   return (
     <div className="drawer-layout">
       <Panel title="改写稿分组" icon={<RefreshCw size={16} />}>
         <div className="tabs"><button className={group === "keyword" ? "active" : ""} onClick={() => setGroup("keyword")}>关键词</button><button className={group === "type" ? "active" : ""} onClick={() => setGroup("type")}>文章类型</button></div>
-        {Object.entries(grouped).map(([name, rows]) => <Activity key={name} icon={<Search size={16} />} title={name} desc={`${rows.length} 篇改写稿`} />)}
+        {items.length ? Object.entries(grouped).map(([name, rows]) => <Activity key={name} icon={<Search size={16} />} title={name} desc={`${rows.length} 篇改写稿`} />) : <EmptyPanelText text="暂无改写稿。" />}
       </Panel>
-      <Panel title="改写文章管理" icon={<Newspaper size={16} />} aside={<Chip text={`${rewrittenArticles.length} 篇筛选结果`} type="brand" />}>
+      <Panel title="改写文章管理" icon={<Newspaper size={16} />} aside={<Chip text={`${items.length} 篇筛选结果`} type={items.length ? "brand" : "warn"} />}>
         <div className="actions block-actions">
           <button className="btn" onClick={() => runBackendStep("rewrite")}>生成改写稿</button>
-          <button className="btn primary" disabled={project.steps.rewrite.status !== "completed"} onClick={() => confirmBackendStep("rewrite")}>确认选中改写稿</button>
+          <button className="btn primary" disabled={project.steps.rewrite.status !== "completed"} onClick={() => confirmBackendStep("rewrite")}>确认改写稿</button>
         </div>
-        {rewrittenArticles.map(article => (
-          <article className="review-card" key={article.id}>
+        {items.length ? items.map(item => (
+          <article className="review-card" key={item.id}>
             <div className="review-card-head">
               <RefreshCw size={16} />
-              <div><h3>{article.title}</h3><div className="chips"><Chip text={article.keyword} type="brand" /><Chip text={article.status} type={article.status.includes("已") ? "good" : "warn"} /><Chip text={article.used} /></div></div>
+              <div><h3>{item.title}</h3><div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.status} /><Chip text={item.used} /></div></div>
               <button className="btn">确认</button>
             </div>
-            <p>{article.note}</p>
+            <p>{item.markdown || item.role}</p>
           </article>
-        ))}
+        )) : <EmptyPanelText text="暂无改写稿。请先生成正文，再运行改写。" />}
       </Panel>
     </div>
   );
 }
 
-function LibraryView({ project, group, setGroup, outputs, logs }: { project: Project; group: "keyword" | "type"; setGroup: (group: "keyword" | "type") => void; outputs: string[]; logs: string }) {
-  const allItems = [...articles, ...rewrittenArticles.map(item => ({ ...item, body: item.note, isRewrite: true }))];
+function LibraryView({ project, data, group, setGroup, outputs, logs }: { project: Project; data: DerivedData; group: "keyword" | "type"; setGroup: (group: "keyword" | "type") => void; outputs: string[]; logs: string }) {
+  const allItems = [...data.articles, ...data.rewrites];
   const grouped = groupBy(allItems, group);
   return (
     <div className="library-grid">
       <Panel title="归档分组" icon={<Archive size={16} />}>
         <div className="tabs"><button className={group === "keyword" ? "active" : ""} onClick={() => setGroup("keyword")}>关键词</button><button className={group === "type" ? "active" : ""} onClick={() => setGroup("type")}>文章类型</button></div>
-        {Object.entries(grouped).map(([name, rows]) => <Activity key={name} icon={<Archive size={16} />} title={name} desc={`${rows.length} 篇文章`} />)}
+        {allItems.length ? Object.entries(grouped).map(([name, rows]) => <Activity key={name} icon={<Archive size={16} />} title={name} desc={`${rows.length} 篇文章`} />) : <EmptyPanelText text="暂无归档文章。" />}
       </Panel>
       <Panel title="文章列表与输出文件" icon={<BookOpen size={16} />} aside={<a className="btn primary" href={`/api/projects/${project.id}/export/markdown.zip`}><Download size={15} />导出</a>}>
         <div className="article-list">
-          {allItems.map(article => (
-            <article className="library-item" key={article.id}>
-              <div><h3>{article.title}</h3><p>{article.body}</p><div className="chips"><Chip text={article.keyword} type="brand" /><Chip text={article.type} /><Chip text={article.status} type={article.status.includes("已") ? "good" : "warn"} /></div></div>
+          {allItems.length ? allItems.map(item => (
+            <article className="library-item" key={item.id}>
+              <div><h3>{item.title}</h3><p>{item.markdown || item.role}</p><div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.type} /><Chip text={item.status} /></div></div>
               <button className="btn"><BookOpen size={15} />查阅</button>
             </article>
-          ))}
+          )) : <EmptyPanelText text="暂无文章。生成正文或改写稿后会显示在这里。" />}
         </div>
         <div className="output-list">
           <h3>后台输出文件</h3>
@@ -623,14 +597,14 @@ function LibraryView({ project, group, setGroup, outputs, logs }: { project: Pro
   );
 }
 
-function PlanRow({ item, selected, onToggle }: { item: (typeof planItems)[number]; selected: boolean; onToggle: () => void }) {
+function PlanRow({ item, selected, onToggle }: { item: ContentItem; selected: boolean; onToggle: () => void }) {
   return (
     <article className={`plan-row ${selected ? "selected" : ""}`}>
       <input type="checkbox" checked={selected} onChange={onToggle} />
       <div>
         <h3>{item.type}｜{item.title}</h3>
         <p>{item.role}</p>
-        <div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.channel} /><Chip text={item.articleStatus} type={item.articleStatus.includes("已") ? "good" : "warn"} /><Chip text={item.used} /></div>
+        <div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.channel} /><Chip text={item.status} /><Chip text={item.used} /></div>
       </div>
       <button className="btn">调整</button>
     </article>
@@ -667,7 +641,107 @@ function EmptyState() {
   return <div className="panel empty">请先创建或选择一个项目。</div>;
 }
 
-function groupBy<T extends Record<string, unknown>>(rows: T[], key: keyof T): Record<string, T[]> {
+function EmptyPanelText({ text }: { text: string }) {
+  return <p className="muted">{text}</p>;
+}
+
+interface DerivedData {
+  intakeRows: Array<{ id: string; field: string; value: string; source: string; confidence: string; status: string }>;
+  matrixPlans: ContentItem[];
+  breakthroughPlans: ContentItem[];
+  plans: ContentItem[];
+  briefs: ContentItem[];
+  articles: ContentItem[];
+  rewrites: ContentItem[];
+  archiveCount: number;
+}
+
+function emptyDerivedData(): DerivedData {
+  return { intakeRows: [], matrixPlans: [], breakthroughPlans: [], plans: [], briefs: [], articles: [], rewrites: [], archiveCount: 0 };
+}
+
+function deriveProjectData(project: Project): DerivedData {
+  const matrixPlans = normalizeItems(project.steps.matrix.output, "matrix");
+  const breakthroughPlans = normalizeItems(project.steps.breakthrough.output, "breakthrough");
+  const briefs = normalizeItems(project.steps.brief.output, "brief");
+  const articles = normalizeItems(project.steps.article.output, "article");
+  const rewrites = normalizeItems(project.steps.rewrite.output, "rewrite");
+  return {
+    intakeRows: normalizeIntake(project.steps.intake.output),
+    matrixPlans,
+    breakthroughPlans,
+    plans: [...matrixPlans, ...breakthroughPlans],
+    briefs,
+    articles,
+    rewrites,
+    archiveCount: [...articles, ...rewrites].filter(item => item.status.includes("已") || item.status === "completed").length
+  };
+}
+
+function normalizeIntake(output: AnyRecord): DerivedData["intakeRows"] {
+  const rows = extractArray(output);
+  return rows.map((row, index) => ({
+    id: readString(row, ["id", "字段", "field"], `field-${index}`),
+    field: readString(row, ["field", "字段", "name"], `字段 ${index + 1}`),
+    value: readString(row, ["value", "推断值", "inferred_value", "answer"], JSON.stringify(row)),
+    source: readString(row, ["source", "来源/依据", "依据", "basis"], "未标注"),
+    confidence: readString(row, ["confidence", "置信度"], "未标注"),
+    status: readString(row, ["status", "状态"], "待确认")
+  }));
+}
+
+function normalizeItems(output: AnyRecord, step: string): ContentItem[] {
+  const rows = extractArray(output);
+  if (!rows.length && typeof output.markdown === "string") {
+    rows.push(output);
+  }
+  return rows.map((row, index) => ({
+    id: readString(row, ["id"], `${step}-${index}`),
+    keyword: readString(row, ["keyword", "target_keyword", "目标关键词", "主攻关键词"], "未标注关键词"),
+    type: readString(row, ["type", "article_type", "文章类型"], stepLabel(step)),
+    title: readString(row, ["title", "suggested_title", "建议标题", "文章标题"], readString(output, ["title"], stepLabel(step))),
+    role: readString(row, ["role", "summary", "主要作用", "brief", "description"], readString(output, ["summary"], "后台 Agent 已生成结果。")),
+    channel: readString(row, ["channel", "发布渠道"], "未标注渠道"),
+    status: readString(row, ["status", "状态"], output.status ? String(output.status) : "completed"),
+    used: readString(row, ["used", "使用状态"], "未使用"),
+    markdown: readString(row, ["markdown", "body", "正文"], readString(output, ["markdown"], "")),
+    raw: row
+  }));
+}
+
+function extractArray(output: AnyRecord): AnyRecord[] {
+  for (const key of ["items", "rows", "fields", "plans", "articles", "briefs", "data"]) {
+    const value = output[key];
+    if (Array.isArray(value)) return value.filter(isRecord);
+  }
+  return [];
+}
+
+function readString(row: AnyRecord, keys: string[], fallback = ""): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value === "number") return String(value);
+  }
+  return fallback;
+}
+
+function isRecord(value: unknown): value is AnyRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stepLabel(step: string): string {
+  const labels: Record<string, string> = {
+    matrix: "内容矩阵",
+    breakthrough: "逐词击破",
+    brief: "Brief",
+    article: "正文",
+    rewrite: "改写稿"
+  };
+  return labels[step] || step;
+}
+
+function groupBy<T>(rows: T[], key: keyof T): Record<string, T[]> {
   return rows.reduce<Record<string, T[]>>((acc, row) => {
     const value = String(row[key] || "未分组");
     acc[value] ||= [];
