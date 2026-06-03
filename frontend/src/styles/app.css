@@ -592,6 +592,13 @@ p {
   border-radius: 8px;
   background: #fff;
   overflow: hidden;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.slot-card:hover {
+  border-color: rgba(15, 139, 141, 0.36);
+  box-shadow: 0 14px 30px rgba(28, 44, 52, 0.08);
+  transform: translateY(-1px);
 }
 
 .slot-card.required {
@@ -629,9 +636,86 @@ p {
   display: flex;
   justify-content: space-between;
   gap: 10px;
+  align-items: center;
   padding: 12px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.slot-file-state {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.slot-file-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: #8297a0;
+  background: #eef3f5;
+}
+
+.slot-file-icon.filled {
+  color: var(--brand-dark);
+  background: #e4f4f3;
+}
+
+.slot-file-copy {
+  min-width: 0;
+}
+
+.slot-file-copy strong,
+.slot-file-copy span {
+  display: block;
+}
+
+.slot-file-copy strong {
+  max-width: 340px;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slot-file-copy span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.slot-upload {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid #b8d7d6;
+  border-radius: 6px;
+  color: var(--brand-dark);
+  background: #eef8f7;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.slot-upload:hover {
+  border-color: var(--brand);
+  background: #e2f4f3;
+}
+
+.slot-upload input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .confirm-table {

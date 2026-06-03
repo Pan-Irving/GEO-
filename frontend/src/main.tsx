@@ -76,7 +76,6 @@ function App() {
   const [selectedArticles, setSelectedArticles] = useState<Set<string>>(new Set());
   const [confirmedFields, setConfirmedFields] = useState<Set<string>>(new Set());
   const [projectName, setProjectName] = useState("GEO 内容项目");
-  const [files, setFiles] = useState<FileList | null>(null);
   const [logs, setLogs] = useState("");
   const [outputs, setOutputs] = useState<string[]>([]);
   const [health, setHealth] = useState<{ model: string; skill_available: boolean } | null>(null);
@@ -231,8 +230,6 @@ function App() {
               <UploadView
                 project={project}
                 data={data}
-                files={files}
-                setFiles={setFiles}
                 confirmedFields={confirmedFields}
                 setConfirmedFields={setConfirmedFields}
                 run={run}
@@ -323,15 +320,13 @@ function DashboardView({ project, data, setCurrent }: { project: Project; data: 
 function UploadView(props: {
   project: Project;
   data: DerivedData;
-  files: FileList | null;
-  setFiles: (files: FileList | null) => void;
   confirmedFields: Set<string>;
   setConfirmedFields: React.Dispatch<React.SetStateAction<Set<string>>>;
   run: (action: () => Promise<unknown>, success: string) => Promise<void>;
   runBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const { project, data, files, setFiles, confirmedFields, setConfirmedFields, run, runBackendStep, confirmBackendStep } = props;
+  const { project, data, confirmedFields, setConfirmedFields, run, runBackendStep, confirmBackendStep } = props;
   return (
     <div className="section-stack">
       <div className="stat-row">
@@ -342,14 +337,6 @@ function UploadView(props: {
       </div>
       <Panel title="资料入口" icon={<FileArchive size={16} />}>
         <div className="upload-strip">
-          <label className="upload-inline">
-            <Upload size={18} />
-            <span>选择资料文件</span>
-            <input type="file" multiple onChange={event => setFiles(event.target.files)} />
-          </label>
-          <button className="btn" disabled={!files} onClick={() => run(async () => {
-            if (files) await api.uploadMaterials(project.id, files);
-          }, "资料已上传。")}>上传到资料池</button>
           <button className="btn primary" disabled={project.materials.length === 0} onClick={() => run(async () => {
             await api.parseMaterials(project.id);
           }, "资料解析完成。")}>
@@ -359,16 +346,37 @@ function UploadView(props: {
         </div>
         <div className="slot-grid">
           {materialSlots.map((slot, index) => {
-            const material = project.materials[index];
+            const materials = project.materials.filter(material => material.filename.startsWith(`${slot.id}__`));
+            const slotStatus = materials.some(material => material.status === "parsed") ? "parsed" : materials.length ? "uploaded" : slot.required ? "pending" : "optional";
             return (
               <article className={`slot-card ${slot.required ? "required" : "optional"}`} key={slot.id}>
                 <div className="slot-head">
                   <div><h3>{slot.name}</h3><p>{slot.desc}</p></div>
-                  <Status status={material?.status || (slot.required ? "pending" : "optional")} />
+                  <Status status={slotStatus} />
                 </div>
                 <div className="slot-body">
-                  <strong>{material?.filename || "未上传"}</strong>
-                  <span>{slot.required ? "必填" : "可选"}</span>
+                  <div className="slot-file-state">
+                    <div className={`slot-file-icon ${materials.length ? "filled" : ""}`}><FileText size={16} /></div>
+                    <div className="slot-file-copy">
+                      {materials.length ? materials.map(material => (
+                        <strong key={material.id}>{stripSlotPrefix(material.filename)}</strong>
+                      )) : <strong>未上传资料</strong>}
+                      <span>{materials.length ? `${materials.length} 个文件，${slotStatus === "parsed" ? "已解析" : "待解析"}` : slot.required ? "必填资料入口" : "可选补充入口"}</span>
+                    </div>
+                  </div>
+                  <label className="slot-upload">
+                    <Upload size={15} />
+                    {materials.length ? "替换/追加" : "上传"}
+                    <input type="file" multiple onChange={event => {
+                      const selected = event.target.files;
+                      if (!selected || selected.length === 0) return;
+                      const renamed = renameFilesForSlot(selected, slot.id);
+                      void run(async () => {
+                        await api.uploadMaterials(project.id, renamed);
+                      }, `${slot.name} 已上传。`);
+                      event.target.value = "";
+                    }} />
+                  </label>
                 </div>
               </article>
             );
@@ -755,6 +763,18 @@ function toggleSet(current: Set<string>, id: string): Set<string> {
   if (next.has(id)) next.delete(id);
   else next.add(id);
   return next;
+}
+
+function renameFilesForSlot(files: FileList, slotId: string): FileList {
+  const transfer = new DataTransfer();
+  Array.from(files).forEach(file => {
+    transfer.items.add(new File([file], `${slotId}__${file.name}`, { type: file.type, lastModified: file.lastModified }));
+  });
+  return transfer.files;
+}
+
+function stripSlotPrefix(filename: string): string {
+  return filename.replace(/^[a-zA-Z0-9_-]+__/, "");
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
