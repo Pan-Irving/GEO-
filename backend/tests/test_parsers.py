@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from openpyxl import Workbook
+from pypdf import PdfWriter
 
 from app.services.parsers import parse_material
 
@@ -35,3 +36,24 @@ def test_parse_xlsx_file(tmp_path: Path):
 
     assert "## 关键词" in parsed
     assert "洗碗机哪个品牌好" in parsed
+
+
+def test_parse_pdf_file_without_text_does_not_fail(tmp_path: Path):
+    path = tmp_path / "certificate.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with path.open("wb") as handle:
+        writer.write(handle)
+
+    parsed = parse_material(path)
+
+    assert "PDF 未抽取到可读文本" in parsed
+
+
+def test_parse_image_file_as_placeholder(tmp_path: Path):
+    path = tmp_path / "rank.jpg"
+    path.write_bytes(b"fake image bytes")
+
+    parsed = parse_material(path)
+
+    assert "当前版本不做本地 OCR" in parsed
