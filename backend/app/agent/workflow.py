@@ -7,6 +7,7 @@ from app.core.config import Settings
 from app.models.schemas import RUNNABLE_STEPS, STEP_ORDER, WorkflowStep
 from app.services.openai_client import OpenAIWorkflowClient
 from app.services.parsers import ParseError, parse_material
+from app.services.vision_ocr import VisionOcr
 from app.storage.repository import ProjectRepository
 from app.utils.files import slugify
 
@@ -47,10 +48,15 @@ class AgentWorkflow:
             raise WorkflowError("请先上传项目资料。")
 
         parsed_blocks: list[str] = []
+        vision_ocr = VisionOcr(self.settings) if self.settings.enable_vision_ocr else None
         for material in project.materials:
             source = self.repository.materials_dir(project_id) / material.stored_name
             try:
-                text = parse_material(source)
+                text = parse_material(
+                    source,
+                    image_ocr=vision_ocr.extract_image if vision_ocr else None,
+                    pdf_ocr=vision_ocr.extract_pdf if vision_ocr else None,
+                )
                 parsed_name = f"{Path(material.stored_name).stem}.md"
                 parsed_path = self.repository.parsed_dir(project_id) / parsed_name
                 parsed_path.write_text(f"# {material.filename}\n\n{text}\n", encoding="utf-8")

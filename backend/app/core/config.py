@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     openai_base_url: str = ""
     openai_model: str = "gpt-5.5"
     openai_api_mode: str = "chat"
+    openai_vision_model: str = ""
+    enable_vision_ocr: bool = True
+    vision_ocr_max_pages: int = 8
     app_data_dir: str = "app-data"
     frontend_origin: str = "http://localhost:5173"
 

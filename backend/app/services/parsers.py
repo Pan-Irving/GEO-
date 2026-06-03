@@ -2,6 +2,7 @@ import csv
 import json
 from io import StringIO
 from pathlib import Path
+from typing import Callable
 
 from openpyxl import load_workbook
 from pypdf import PdfReader
@@ -15,7 +16,12 @@ class ParseError(ValueError):
     pass
 
 
-def parse_material(path: Path) -> str:
+def parse_material(
+    path: Path,
+    *,
+    image_ocr: Callable[[Path], str] | None = None,
+    pdf_ocr: Callable[[Path], str] | None = None,
+) -> str:
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ParseError(f"暂不支持该文件格式：{suffix}")
@@ -29,9 +35,9 @@ def parse_material(path: Path) -> str:
     if suffix == ".xlsx":
         return parse_xlsx(path)
     if suffix == ".pdf":
-        return parse_pdf(path)
+        return parse_pdf(path, pdf_ocr=pdf_ocr)
     if suffix in IMAGE_EXTENSIONS:
-        return parse_image_placeholder(path)
+        return image_ocr(path) if image_ocr else parse_image_placeholder(path)
     raise ParseError(f"暂不支持该文件格式：{suffix}")
 
 
@@ -51,7 +57,7 @@ def parse_xlsx(path: Path) -> str:
     return "\n\n".join(sections)
 
 
-def parse_pdf(path: Path) -> str:
+def parse_pdf(path: Path, *, pdf_ocr: Callable[[Path], str] | None = None) -> str:
     reader = PdfReader(str(path))
     sections: list[str] = [f"## {path.name}", ""]
     for index, page in enumerate(reader.pages, start=1):
@@ -59,6 +65,8 @@ def parse_pdf(path: Path) -> str:
         text = text.strip()
         if text:
             sections.append(f"### 第 {index} 页\n\n{text}")
+    if len(sections) <= 2 and pdf_ocr:
+        return pdf_ocr(path)
     if len(sections) <= 2:
         sections.append("（PDF 未抽取到可读文本，可能是扫描件或图片型 PDF。请补充 OCR 后的文字资料。）")
     return "\n\n".join(sections)

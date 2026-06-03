@@ -27,6 +27,9 @@ OPENAI_API_KEY=你的中转站 key
 OPENAI_BASE_URL=https://你的中转站地址/v1
 OPENAI_MODEL=你的模型名
 OPENAI_API_MODE=chat
+OPENAI_VISION_MODEL=支持图片理解的模型名
+ENABLE_VISION_OCR=true
+VISION_OCR_MAX_PAGES=8
 ```
 
 默认使用 Chat Completions 兼容模式，适配只支持 `/v1/chat/completions` 的中转站。如果你的服务支持 Responses API，可改为：
@@ -34,6 +37,8 @@ OPENAI_API_MODE=chat
 ```bash
 OPENAI_API_MODE=responses
 ```
+
+图片资料会通过 `OPENAI_VISION_MODEL` 做 OCR/资料提取；如果不填，默认使用 `OPENAI_MODEL`。扫描版 PDF 在普通文本抽取失败时，会转成图片后再做 OCR。`VISION_OCR_MAX_PAGES` 用来限制扫描 PDF 最多 OCR 的页数，避免一次消耗过高。
 
 ## 前端启动
 
