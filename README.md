@@ -20,6 +20,16 @@ cp ../.env.example .env
 uvicorn app.main:app --reload
 ```
 
+如果使用 LLM 中转站，在 `.env` 中配置：
+
+```bash
+OPENAI_API_KEY=你的中转站 key
+OPENAI_BASE_URL=https://你的中转站地址/v1
+OPENAI_MODEL=你的模型名
+```
+
+中转站需要兼容 OpenAI Responses API。若只兼容 Chat Completions，需要后续再加一层兼容适配。
+
 ## 前端启动
 
 ```bash

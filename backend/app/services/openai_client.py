@@ -11,7 +11,10 @@ class OpenAIWorkflowClient:
         if not settings.openai_api_key:
             raise RuntimeError("缺少 OPENAI_API_KEY，请在 .env 中配置后重试。")
         self.model = settings.openai_model
-        self.client = OpenAI(api_key=settings.openai_api_key)
+        kwargs: dict[str, str] = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            kwargs["base_url"] = settings.openai_base_url.rstrip("/")
+        self.client = OpenAI(**kwargs)
 
     def generate_json(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
         response = self.client.responses.create(
