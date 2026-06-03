@@ -347,7 +347,7 @@ function UploadView(props: {
         <div className="slot-grid">
           {materialSlots.map((slot, index) => {
             const materials = project.materials.filter(material => material.filename.startsWith(`${slot.id}__`));
-            const slotStatus = materials.some(material => material.status === "parsed") ? "parsed" : materials.length ? "uploaded" : slot.required ? "pending" : "optional";
+            const slotStatus = resolveSlotStatus(materials, slot.required);
             return (
               <article className={`slot-card ${slot.required ? "required" : "optional"}`} key={slot.id}>
                 <div className="slot-head">
@@ -361,7 +361,7 @@ function UploadView(props: {
                       {materials.length ? materials.map(material => (
                         <strong key={material.id}>{stripSlotPrefix(material.filename)}</strong>
                       )) : <strong>未上传资料</strong>}
-                      <span>{materials.length ? `${materials.length} 个文件，${slotStatus === "parsed" ? "已解析" : "待解析"}` : slot.required ? "必填资料入口" : "可选补充入口"}</span>
+                      <span>{materials.length ? describeSlotFiles(materials) : slot.required ? "必填资料入口" : "可选补充入口"}</span>
                     </div>
                   </div>
                   <label className="slot-upload">
@@ -775,6 +775,24 @@ function renameFilesForSlot(files: FileList, slotId: string): FileList {
 
 function stripSlotPrefix(filename: string): string {
   return filename.replace(/^[a-zA-Z0-9_-]+__/, "");
+}
+
+function resolveSlotStatus(materials: Project["materials"], required: boolean): string {
+  if (!materials.length) return required ? "pending" : "optional";
+  if (materials.some(material => material.status === "failed")) return "failed";
+  if (materials.every(material => material.status === "parsed")) return "parsed";
+  return "uploaded";
+}
+
+function describeSlotFiles(materials: Project["materials"]): string {
+  const parsed = materials.filter(material => material.status === "parsed").length;
+  const failed = materials.filter(material => material.status === "failed").length;
+  const uploaded = materials.length - parsed - failed;
+  const parts = [`${materials.length} 个文件`];
+  if (parsed) parts.push(`${parsed} 个已解析`);
+  if (uploaded) parts.push(`${uploaded} 个待解析`);
+  if (failed) parts.push(`${failed} 个失败`);
+  return parts.join("，");
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
