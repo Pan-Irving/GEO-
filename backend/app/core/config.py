@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = "gpt-5.5"
+    openai_api_mode: str = "chat"
     app_data_dir: str = "app-data"
     frontend_origin: str = "http://localhost:5173"
 

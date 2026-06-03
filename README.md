@@ -26,9 +26,14 @@ uvicorn app.main:app --reload
 OPENAI_API_KEY=你的中转站 key
 OPENAI_BASE_URL=https://你的中转站地址/v1
 OPENAI_MODEL=你的模型名
+OPENAI_API_MODE=chat
 ```
 
-中转站需要兼容 OpenAI Responses API。若只兼容 Chat Completions，需要后续再加一层兼容适配。
+默认使用 Chat Completions 兼容模式，适配只支持 `/v1/chat/completions` 的中转站。如果你的服务支持 Responses API，可改为：
+
+```bash
+OPENAI_API_MODE=responses
+```
 
 ## 前端启动
 

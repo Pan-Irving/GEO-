@@ -15,8 +15,13 @@ class OpenAIWorkflowClient:
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url.rstrip("/")
         self.client = OpenAI(**kwargs)
+        self.api_mode = settings.openai_api_mode.lower().strip()
 
     def generate_json(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
+        if self.api_mode == "chat":
+            return self._generate_json_with_chat(system=system, user=user, schema_name=schema_name)
+        if self.api_mode != "responses":
+            raise RuntimeError("OPENAI_API_MODE 只支持 chat 或 responses。")
         response = self.client.responses.create(
             model=self.model,
             input=[
@@ -40,6 +45,27 @@ class OpenAIWorkflowClient:
 
     def generate_markdown(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
         return self.generate_json(system=system, user=user, schema_name=schema_name)
+
+    def _generate_json_with_chat(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        system
+                        + "\n\n你必须只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。"
+                    ),
+                },
+                {"role": "user", "content": user},
+            ],
+            response_format={"type": "json_object"},
+        )
+        text = response.choices[0].message.content or "{}"
+        try:
+            return json.loads(strip_json_fence(text))
+        except json.JSONDecodeError:
+            return {"title": schema_name, "markdown": text, "raw": text}
 
 
 def extract_output_text(response: Any) -> str:
@@ -68,3 +94,11 @@ def json_object_schema(name: str) -> dict[str, Any]:
         },
         "required": [],
     }
+
+
+def strip_json_fence(text: str) -> str:
+    value = text.strip()
+    if value.startswith("```"):
+        value = value.removeprefix("```json").removeprefix("```").strip()
+        value = value.removesuffix("```").strip()
+    return value
