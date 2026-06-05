@@ -1,15 +1,29 @@
 import type { Project, WorkflowStep } from "./types";
 
+const REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers }
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed: ${response.status}`);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: init?.signal || controller.signal,
+      headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers }
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Request failed: ${response.status}`);
+    }
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请刷新状态后重试。");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return response.json() as Promise<T>;
 }
 
 export const api = {
@@ -24,7 +38,7 @@ export const api = {
     return request<{ materials: unknown[] }>(`/api/projects/${projectId}/materials`, { method: "POST", body: form });
   },
   parseMaterials: (projectId: string) =>
-    request<{ project: Project }>(`/api/projects/${projectId}/materials/parse`, { method: "POST" }),
+    request<{ job_id?: string; project: Project }>(`/api/projects/${projectId}/materials/parse`, { method: "POST" }),
   runStep: (projectId: string, step: WorkflowStep, payload: Record<string, unknown>) =>
     request<{ job_id: string; project: Project }>(`/api/projects/${projectId}/run/${step}`, {
       method: "POST",
@@ -34,6 +48,16 @@ export const api = {
     request<{ project: Project }>(`/api/projects/${projectId}/confirm/${step}`, {
       method: "POST",
       body: JSON.stringify({ notes })
+    }),
+  confirmBreakthroughKeywords: (projectId: string, keywords: string[]) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/planning/breakthrough-keywords`, {
+      method: "POST",
+      body: JSON.stringify({ keywords })
+    }),
+  updateItem: (projectId: string, step: WorkflowStep, itemId: string, payload: Record<string, unknown>) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/steps/${step}/items/${encodeURIComponent(itemId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ payload })
     }),
   getLogs: (projectId: string) => request<{ logs: string }>(`/api/projects/${projectId}/logs`),
   getOutputs: (projectId: string) => request<{ files: string[] }>(`/api/projects/${projectId}/outputs`)

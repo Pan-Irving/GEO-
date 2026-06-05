@@ -4,7 +4,15 @@ from fastapi.responses import FileResponse
 from app.agent.skill_loader import SkillLoader
 from app.agent.workflow import AgentWorkflow, WorkflowError
 from app.core.config import Settings, get_settings
-from app.models.schemas import ConfirmStepRequest, HealthResponse, ProjectCreate, RunStepRequest, WorkflowStep
+from app.models.schemas import (
+    BreakthroughKeywordSelectionRequest,
+    ConfirmStepRequest,
+    HealthResponse,
+    ProjectCreate,
+    RunStepRequest,
+    UpdateItemRequest,
+    WorkflowStep,
+)
 from app.storage.repository import ProjectRepository
 
 router = APIRouter(prefix="/api")
@@ -61,10 +69,15 @@ async def upload_materials(
 
 
 @router.post("/projects/{project_id}/materials/parse")
-def parse_materials(project_id: str, workflow: AgentWorkflow = Depends(get_workflow)):
+def parse_materials(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    workflow: AgentWorkflow = Depends(get_workflow),
+):
     try:
-        workflow.parse_materials(project_id)
-        return {"project": workflow.repository.load_project(project_id)}
+        job_id = workflow.start_materials_parse(project_id)
+        background_tasks.add_task(workflow.parse_materials, project_id, job_id)
+        return {"job_id": job_id, "project": workflow.repository.load_project(project_id)}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WorkflowError as exc:
@@ -101,6 +114,38 @@ def confirm_step(
         return {"project": workflow.repository.load_project(project_id)}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/planning/breakthrough-keywords")
+def confirm_breakthrough_keywords(
+    project_id: str,
+    payload: BreakthroughKeywordSelectionRequest,
+    workflow: AgentWorkflow = Depends(get_workflow),
+):
+    try:
+        workflow.confirm_breakthrough_keywords(project_id, payload.keywords)
+        return {"project": workflow.repository.load_project(project_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/projects/{project_id}/steps/{step}/items/{item_id}")
+def update_step_item(
+    project_id: str,
+    step: WorkflowStep,
+    item_id: str,
+    payload: UpdateItemRequest,
+    workflow: AgentWorkflow = Depends(get_workflow),
+):
+    try:
+        workflow.update_item(project_id, step, item_id, payload.payload)
+        return {"project": workflow.repository.load_project(project_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/jobs")

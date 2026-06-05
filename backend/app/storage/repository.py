@@ -36,6 +36,49 @@ class ProjectRepository:
             projects.append(self.load_project(path.parent.name))
         return projects
 
+    def recover_interrupted_jobs(self) -> None:
+        for path in sorted(self.projects_root.glob("*/project.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            changed = False
+            for state in data.get("steps", {}).values():
+                if state.get("status") == "running":
+                    output = state.get("output")
+                    items = output.get("items") if isinstance(output, dict) else None
+                    if isinstance(items, list):
+                        has_completed = False
+                        has_failed = False
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("status") == "running":
+                                item["status"] = "failed"
+                                item["error"] = "服务重启或任务中断，请单独重试该篇。"
+                                has_failed = True
+                            elif item.get("status") == "completed":
+                                has_completed = True
+                            elif item.get("status") == "failed":
+                                has_failed = True
+                        output["status"] = "partial_failed" if has_failed else "completed"
+                        state["status"] = "completed" if has_completed else "failed"
+                        state["error"] = "服务重启或任务中断，请重试失败项。" if has_failed else None
+                    elif state.get("output"):
+                        state["status"] = "completed"
+                        state["error"] = None
+                    else:
+                        state["status"] = "failed"
+                        state["error"] = "服务重启或任务中断，请重新运行该步骤。"
+                    state["updated_at"] = utc_now()
+                    changed = True
+            for job in data.get("jobs", []):
+                if job.get("status") in {"queued", "running"}:
+                    job["status"] = "failed"
+                    job["error"] = "服务重启或任务中断，请重新运行该步骤。"
+                    job["updated_at"] = utc_now()
+                    changed = True
+            if changed:
+                data["updated_at"] = utc_now()
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def load_project(self, project_id: str) -> Project:
         path = self.project_file(project_id)
         if not path.exists():
@@ -43,6 +86,7 @@ class ProjectRepository:
         data = json.loads(path.read_text(encoding="utf-8"))
         for step in STEP_ORDER:
             data.setdefault("steps", {}).setdefault(step, StepState().model_dump())
+        normalize_blocked_step_states(data)
         return Project.model_validate(data)
 
     def save_project(self, project: Project) -> None:
@@ -104,19 +148,57 @@ class ProjectRepository:
         self.save_project(project)
         return project
 
-    def add_job(self, project_id: str, step: WorkflowStep) -> Job:
+    def add_job(
+        self,
+        project_id: str,
+        step: WorkflowStep,
+        *,
+        total_count: int = 0,
+        skipped_count: int = 0,
+        message: str | None = None,
+    ) -> Job:
         project = self.load_project(project_id)
-        job = Job(id=uuid.uuid4().hex, step=step)
+        job = Job(
+            id=uuid.uuid4().hex,
+            step=step,
+            total_count=total_count,
+            skipped_count=skipped_count,
+            message=message,
+        )
         project.jobs.insert(0, job)
         self.save_project(project)
         return job
 
-    def update_job(self, project_id: str, job_id: str, *, status: str, error: str | None = None) -> Project:
+    def update_job(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        total_count: int | None = None,
+        completed_count: int | None = None,
+        failed_count: int | None = None,
+        skipped_count: int | None = None,
+        current_item: str | None = None,
+        message: str | None = None,
+    ) -> Project:
         project = self.load_project(project_id)
         for job in project.jobs:
             if job.id == job_id:
                 job.status = status  # type: ignore[assignment]
                 job.error = error
+                if total_count is not None:
+                    job.total_count = total_count
+                if completed_count is not None:
+                    job.completed_count = completed_count
+                if failed_count is not None:
+                    job.failed_count = failed_count
+                if skipped_count is not None:
+                    job.skipped_count = skipped_count
+                job.current_item = current_item
+                if message is not None:
+                    job.message = message
                 job.updated_at = utc_now()
                 break
         self.save_project(project)
@@ -169,3 +251,56 @@ class ProjectRepository:
 
     def outputs_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "outputs"
+
+
+def normalize_blocked_step_states(data: dict[str, Any]) -> None:
+    steps = data.get("steps", {})
+    jobs = data.get("jobs", [])
+    if not isinstance(steps, dict) or not isinstance(jobs, list):
+        return
+    for step, state in steps.items():
+        if not isinstance(state, dict):
+            continue
+        message = blocked_output_message(state.get("output"))
+        if not message:
+            continue
+        state["status"] = "failed"
+        state["error"] = message
+        for job in jobs:
+            if not isinstance(job, dict) or job.get("step") != step:
+                continue
+            if job.get("status") == "completed":
+                job["status"] = "failed"
+                job["completed_count"] = 0
+                job["failed_count"] = max(int(job.get("failed_count") or 0), 1)
+                job["error"] = message
+                job["message"] = f"{blocked_step_label(str(step))}需要补充输入。"
+            break
+
+
+def blocked_output_message(output: Any) -> str:
+    if not isinstance(output, dict):
+        return ""
+    status = str(output.get("status") or "").lower()
+    if "blocked" not in status and "need_" not in status and "缺失" not in status:
+        return ""
+    for key in ("reason", "next_action_required", "message", "error"):
+        value = output.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    missing = output.get("missing_required_input")
+    if isinstance(missing, dict) and missing:
+        return f"需要补充或确认：{'、'.join(missing.keys())}"
+    return "Agent 返回了需要补充输入的结果，请补充资料或确认关键词后重试。"
+
+
+def blocked_step_label(step: str) -> str:
+    return {
+        "materials": "资料解析",
+        "intake": "抽取表",
+        "matrix": "内容矩阵",
+        "breakthrough": "逐词击破",
+        "brief": "Brief",
+        "article": "正文",
+        "rewrite": "改写稿",
+    }.get(step, step)

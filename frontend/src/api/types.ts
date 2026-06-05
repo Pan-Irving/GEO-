@@ -35,6 +35,12 @@ export interface Job {
   step: WorkflowStep;
   status: "queued" | "running" | "completed" | "failed";
   error?: string | null;
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  skipped_count: number;
+  current_item?: string | null;
+  message?: string | null;
   created_at: string;
   updated_at: string;
 }

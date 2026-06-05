@@ -61,6 +61,12 @@ class Job(BaseModel):
     step: WorkflowStep
     status: Literal["queued", "running", "completed", "failed"] = "queued"
     error: str | None = None
+    total_count: int = 0
+    completed_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    current_item: str | None = None
+    message: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -83,8 +89,16 @@ class RunStepRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class BreakthroughKeywordSelectionRequest(BaseModel):
+    keywords: list[str] = Field(default_factory=list)
+
+
 class ConfirmStepRequest(BaseModel):
     notes: str | None = None
+
+
+class UpdateItemRequest(BaseModel):
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
