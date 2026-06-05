@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.skill_loader import SkillLoader
-from app.agent.workflow import AgentWorkflow, WorkflowError, build_selection_prompt_blocks, normalize_planning_output, planning_output_requirements
+from app.agent.workflow import AgentWorkflow, WorkflowError, build_selection_prompt_blocks, normalize_planning_output, planning_output_requirements, result_to_markdown
 from app.core.config import PROJECT_ROOT, Settings
 from app.storage.repository import ProjectRepository
 
@@ -84,6 +84,155 @@ def test_can_start_intake_after_materials_confirmed(tmp_path: Path):
     assert saved.jobs[0].step == "intake"
     assert saved.jobs[0].total_count == 1
     assert "抽取表" in (saved.jobs[0].message or "")
+
+
+def test_custom_source_is_persisted_and_deduped(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="completed",
+        output={"items": [{"source_id": "matrix-a", "keyword": "GEO 撰文工具", "type": "场景选购文", "title": "矩阵标题"}]},
+    )
+
+    saved = workflow.repository.create_custom_source(
+        project.id,
+        {"title": "如何选择 GEO 撰文工具"},
+    )
+
+    assert len(saved.custom_sources) == 1
+    source = saved.custom_sources[0]
+    assert source.source_step == "custom"
+    assert source.source_id.startswith("custom-")
+    assert source.keyword == "GEO 撰文工具"
+    assert source.type == "场景选购文"
+    assert source.title == "如何选择 GEO 撰文工具"
+    with pytest.raises(ValueError, match="已存在"):
+        workflow.repository.create_custom_source(
+            project.id,
+            {"title": "如何选择 GEO 撰文工具"},
+        )
+
+
+def test_custom_source_copied_context_infers_keyword_and_type(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"items": [{"source_id": "source-a", "keyword": "高端厨电", "type": "横评对比文", "title": "原规划"}]},
+    )
+
+    saved = workflow.repository.create_custom_source(
+        project.id,
+        {"title": "用户改写后的标题", "raw": {"copied_from": {"source_id": "source-a"}}},
+    )
+
+    source = saved.custom_sources[0]
+    assert source.keyword == "高端厨电"
+    assert source.type == "横评对比文"
+    assert source.raw["inferred"]["source"] == "copied_source"
+
+
+@pytest.mark.parametrize(
+    ("title", "article_type"),
+    [
+        ("高端厨电 FAQ 常见问题整理", "FAQ问答文"),
+        ("2026 高端厨电品牌推荐清单", "榜单推荐文"),
+        ("高端厨电和普通厨电横评对比", "横评对比文"),
+        ("开放式厨房怎么选高端厨电指南", "场景选购文"),
+        ("高端厨电实测证据与参数解析", "产品证据文"),
+    ],
+)
+def test_custom_source_infers_article_type_from_title(tmp_path: Path, title: str, article_type: str):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+
+    saved = workflow.repository.create_custom_source(project.id, {"title": title})
+
+    assert saved.custom_sources[0].type == article_type
+
+
+def test_custom_source_edit_before_brief_recomputes_source_id(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    saved = workflow.repository.create_custom_source(project.id, {"title": "旧标题"})
+    old_id = saved.custom_sources[0].source_id
+
+    saved = workflow.repository.update_custom_source(project.id, old_id, {"title": "新标题"})
+
+    assert saved.custom_sources[0].title == "新标题"
+    assert saved.custom_sources[0].source_id != old_id
+    assert saved.custom_sources[0].source_id.startswith("custom-新标题")
+
+
+def test_custom_sources_survive_step_updates(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.create_custom_source(
+        project.id,
+        {"title": "用户自定义标题"},
+    )
+
+    workflow.repository.update_step(project.id, "matrix", status="running", output={})
+
+    saved = workflow.repository.load_project(project.id)
+    assert [source.title for source in saved.custom_sources] == ["用户自定义标题"]
+
+
+def test_custom_source_can_start_brief_generation(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    for step in ["materials", "intake", "matrix", "breakthrough"]:
+        workflow.repository.update_step(project.id, step, status="completed", confirmed=True)
+    saved = workflow.repository.create_custom_source(
+        project.id,
+        {"keyword": "GEO", "type": "FAQ问答文", "title": "用户指定标题", "channel": "官网"},
+    )
+
+    job_id = workflow.start_step(project.id, "brief", {"selected_sources": [saved.custom_sources[0].model_dump()]})
+
+    saved = workflow.repository.load_project(project.id)
+    assert job_id
+    assert saved.steps["brief"].status == "running"
+    selected = saved.steps["brief"].input["selected_sources"][0]
+    assert selected["source_step"] == "custom"
+    assert selected["title"] == "用户指定标题"
+
+
+def test_custom_source_edit_is_rejected_after_brief_exists(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    saved = workflow.repository.create_custom_source(
+        project.id,
+        {"keyword": "GEO", "type": "FAQ问答文", "title": "用户指定标题"},
+    )
+    source_id = saved.custom_sources[0].source_id
+    workflow.repository.update_step(
+        project.id,
+        "brief",
+        status="completed",
+        output={"items": [{"id": f"brief-{source_id}", "source_id": source_id, "title": "用户指定标题"}]},
+    )
+
+    with pytest.raises(ValueError, match="Brief 审核页"):
+        workflow.repository.update_custom_source(
+            project.id,
+            source_id,
+            {"title": "改标题"},
+        )
+
+
+def test_brief_prompt_marks_custom_title_as_required():
+    blocks = build_selection_prompt_blocks(
+        "brief",
+        {"selected_sources": [{"source_id": "custom-a", "source_step": "custom", "keyword": "A", "type": "类型", "title": "用户标题"}]},
+    )
+
+    assert "source_step 为 custom" in "\n".join(blocks)
+    assert "title 是用户指定的目标选题" in "\n".join(blocks)
 
 
 def test_intake_job_success_records_single_step_progress(tmp_path: Path, monkeypatch):
@@ -253,6 +402,61 @@ def test_intake_job_writes_canonical_output_file(tmp_path: Path, monkeypatch):
     text = output_file.read_text(encoding="utf-8")
     assert '"step": "project_intake"' in text
     assert '"id": "target_industry"' in text
+
+
+def test_update_intake_value_rewrites_project_and_markdown(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    output = normalize_planning_output(
+        "intake",
+        {"project_intake_table": [{"id": "target_industry", "field": "目标行业", "value": "旧行业", "source": "资料", "confidence": "高"}]},
+        {},
+    )
+    workflow.repository.update_step(project.id, "intake", status="completed", output=output)
+    workflow.repository.write_output(project, "01-project-intake.md", result_to_markdown("intake", output))
+
+    workflow.update_item(project.id, "intake", "target_industry", {"value": "新行业"})
+
+    saved = workflow.repository.load_project(project.id)
+    row = saved.steps["intake"].output["project_intake_table"][0]
+    assert row["value"] == "新行业"
+    assert row["status"] == "已人工修改"
+    output_file = next(workflow.repository.outputs_dir(project.id).rglob("01-project-intake.md"))
+    text = output_file.read_text(encoding="utf-8")
+    assert "新行业" in text
+    assert "旧行业" not in text
+
+
+def test_confirm_intake_row_persists_status(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    output = normalize_planning_output(
+        "intake",
+        {"project_intake_table": [{"id": "target_category", "field": "目标品类", "value": "品类", "status": "需确认"}]},
+        {},
+    )
+    workflow.repository.update_step(project.id, "intake", status="completed", output=output)
+
+    workflow.update_item(project.id, "intake", "target_category", {"status": "已确认"})
+
+    saved = workflow.repository.load_project(project.id)
+    assert saved.steps["intake"].output["project_intake_table"][1]["status"] == "已确认"
+
+
+def test_update_intake_rejects_unknown_row_or_fields(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    output = normalize_planning_output(
+        "intake",
+        {"project_intake_table": [{"id": "target_industry", "field": "目标行业", "value": "行业"}]},
+        {},
+    )
+    workflow.repository.update_step(project.id, "intake", status="completed", output=output)
+
+    with pytest.raises(WorkflowError, match="只支持修改推断值"):
+        workflow.update_item(project.id, "intake", "target_industry", {"source": "人工"})
+    with pytest.raises(WorkflowError, match="未找到项目信息字段"):
+        workflow.update_item(project.id, "intake", "missing", {"value": "新值"})
 
 
 def test_blocked_agent_result_is_not_marked_completed(tmp_path: Path, monkeypatch):

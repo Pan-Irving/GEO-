@@ -4,6 +4,7 @@ import {
   Archive,
   BadgeAlert,
   BookOpen,
+  ChevronDown,
   CheckCircle2,
   CircleAlert,
   Copy,
@@ -15,17 +16,19 @@ import {
   Loader2,
   Newspaper,
   PenLine,
+  Plus,
   RefreshCw,
   Route,
   Save,
   ScanText,
   Search,
   TableProperties,
+  Trash2,
   Upload,
   X
 } from "lucide-react";
 import { api } from "./api/client";
-import type { Project, WorkflowStep } from "./api/types";
+import type { CustomSourcePayload, Project, WorkflowStep } from "./api/types";
 import "./styles/app.css";
 
 type AppView = "dashboard" | "upload" | "planning" | "brief" | "article" | "rewrite" | "library";
@@ -54,6 +57,15 @@ interface ContentItem {
   briefRevision: number;
   staleReason?: string;
   raw: AnyRecord;
+}
+
+interface IntakeRow {
+  id: string;
+  field: string;
+  value: string;
+  source: string;
+  confidence: string;
+  status: string;
 }
 
 interface DetailState {
@@ -93,7 +105,6 @@ function App() {
   const [selectedPlans, setSelectedPlans] = useState<Set<string>>(new Set());
   const [selectedBriefs, setSelectedBriefs] = useState<Set<string>>(new Set());
   const [selectedArticles, setSelectedArticles] = useState<Set<string>>(new Set());
-  const [confirmedFields, setConfirmedFields] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [projectName, setProjectName] = useState("GEO 内容项目");
   const [logs, setLogs] = useState("");
@@ -170,7 +181,6 @@ function App() {
     setSelectedPlans(new Set());
     setSelectedBriefs(new Set());
     setSelectedArticles(new Set());
-    setConfirmedFields(new Set());
     setDetail(null);
     setMessage("");
     if (!projectId) {
@@ -265,6 +275,27 @@ function App() {
     }, "已确认进入逐词击破的关键词。");
   }
 
+  async function createCustomSource(payload: CustomSourcePayload) {
+    if (!project) return;
+    await run(async () => {
+      await api.createCustomSource(project.id, payload);
+    }, "自定义文章规划已新增。");
+  }
+
+  async function updateCustomSource(sourceId: string, payload: CustomSourcePayload) {
+    if (!project) return;
+    await run(async () => {
+      await api.updateCustomSource(project.id, sourceId, payload);
+    }, "自定义文章规划已更新。");
+  }
+
+  async function deleteCustomSource(sourceId: string) {
+    if (!project) return;
+    await run(async () => {
+      await api.deleteCustomSource(project.id, sourceId);
+    }, "自定义文章规划已删除。");
+  }
+
   const currentMeta = viewMeta[current];
 
   return (
@@ -336,8 +367,6 @@ function App() {
               <UploadView
                 project={project}
                 data={data}
-                confirmedFields={confirmedFields}
-                setConfirmedFields={setConfirmedFields}
                 run={run}
                 runBackendStep={runBackendStep}
                 confirmBackendStep={confirmBackendStep}
@@ -354,6 +383,9 @@ function App() {
                 runBackendStep={runBackendStep}
                 confirmBackendStep={confirmBackendStep}
                 confirmBreakthroughKeywords={confirmBreakthroughKeywords}
+                createCustomSource={createCustomSource}
+                updateCustomSource={updateCustomSource}
+                deleteCustomSource={deleteCustomSource}
                 setCurrent={setCurrent}
                 openDetail={(step, item) => setDetail({ step, item })}
               />
@@ -446,27 +478,38 @@ function DashboardView({ project, data, setCurrent }: { project: Project; data: 
 function UploadView(props: {
   project: Project;
   data: DerivedData;
-  confirmedFields: Set<string>;
-  setConfirmedFields: React.Dispatch<React.SetStateAction<Set<string>>>;
   run: (action: () => Promise<unknown>, success: string) => Promise<void>;
   runBackendStep: (step: WorkflowStep, payload?: Record<string, unknown>) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
 }) {
-  const { project, data, confirmedFields, setConfirmedFields, run, runBackendStep, confirmBackendStep } = props;
+  const { project, data, run, runBackendStep, confirmBackendStep } = props;
   const [confirmRegenerateIntake, setConfirmRegenerateIntake] = useState(false);
+  const [editingIntakeRow, setEditingIntakeRow] = useState<IntakeRow | null>(null);
   const allMaterialsParsed = project.materials.length > 0 && project.materials.every(material => material.status === "parsed");
   const parseDisabled = project.materials.length === 0 || (allMaterialsParsed && project.steps.materials.status === "confirmed");
   const intakeHasOutput = Object.keys(project.steps.intake.output || {}).length > 0;
   const intakeRunning = project.steps.intake.status === "running";
   const intakeButtonText = intakeRunning ? "生成中" : intakeHasOutput ? "重新生成抽取表" : "生成抽取表";
   const intakeOutputUnrecognized = project.steps.intake.status === "completed" && !data.intakeRows.length && Object.keys(project.steps.intake.output || {}).length > 0;
+  const confirmedIntakeRows = data.intakeRows.filter(row => intakeRowPersisted(row)).length;
+  async function confirmIntakeRow(row: IntakeRow) {
+    await run(async () => {
+      await api.updateItem(project.id, "intake", row.id, { status: "已确认" });
+    }, `${row.field} 已确认。`);
+  }
+  async function saveIntakeRow(row: IntakeRow, value: string) {
+    await run(async () => {
+      await api.updateItem(project.id, "intake", row.id, { value });
+    }, `${row.field} 已修改并同步输出文件。`);
+    setEditingIntakeRow(null);
+  }
   return (
     <div className="section-stack">
       <div className="stat-row">
         <Stat value={materialSlots.filter(slot => slot.required).length} label="固定必填资料入口" />
         <Stat value={project.materials.length} label="已上传资料" />
         <Stat value={data.intakeRows.length} label="抽取字段" />
-        <Stat value={confirmedFields.size} label="前端确认字段" />
+        <Stat value={confirmedIntakeRows} label="已确认字段" />
       </div>
       <Panel title="资料入口" icon={<FileArchive size={16} />}>
         <div className="upload-strip">
@@ -552,7 +595,11 @@ function UploadView(props: {
                   <div>{row.value}</div>
                   <div className="source">{row.source}</div>
                   <Chip text={row.confidence || "未标注"} type={row.confidence === "高" ? "good" : "warn"} />
-                  <button className="btn" onClick={() => setConfirmedFields(current => new Set(current).add(row.id))}>{confirmedFields.has(row.id) ? "已确认" : "确认"}</button>
+                  <Chip text={row.status || "待确认"} type={intakeRowPersisted(row) ? "good" : "warn"} />
+                  <div className="row-actions">
+                    <button className="btn" onClick={() => setEditingIntakeRow(row)}>修改</button>
+                    <button className="btn" disabled={row.status === "已确认"} onClick={() => void confirmIntakeRow(row)}>{row.status === "已确认" ? "已确认" : "确认"}</button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -566,6 +613,64 @@ function UploadView(props: {
           <EmptyPanelText text="暂无抽取结果。请先上传资料、解析资料，然后点击“生成抽取表”。" />
         )}
       </Panel>
+      {editingIntakeRow && (
+        <IntakeEditModal
+          row={editingIntakeRow}
+          onClose={() => setEditingIntakeRow(null)}
+          onSave={(value) => void saveIntakeRow(editingIntakeRow, value)}
+        />
+      )}
+    </div>
+  );
+}
+
+function IntakeEditModal({
+  row,
+  onClose,
+  onSave
+}: {
+  row: IntakeRow;
+  onClose: () => void;
+  onSave: (value: string) => void;
+}) {
+  const [value, setValue] = useState(row.value);
+  const canSave = Boolean(value.trim()) && value !== row.value;
+
+  useEffect(() => {
+    setValue(row.value);
+  }, [row]);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form
+        className="confirm-modal intake-edit-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="intake-edit-title"
+        onSubmit={event => {
+          event.preventDefault();
+          if (canSave) onSave(value.trim());
+        }}
+      >
+        <h2 id="intake-edit-title">修改项目信息</h2>
+        <p>{row.field}</p>
+        <div className="detail-meta">
+          <Chip text={row.confidence || "未标注"} type={row.confidence === "高" ? "good" : "warn"} />
+          <Chip text={row.status || "待确认"} />
+        </div>
+        <label className="field-block">
+          <span>推断值</span>
+          <textarea className="notes-area" value={value} onChange={event => setValue(event.target.value)} />
+        </label>
+        <label className="field-block">
+          <span>来源依据</span>
+          <textarea className="notes-area" value={row.source} readOnly />
+        </label>
+        <div className="actions end">
+          <button type="button" className="btn" onClick={onClose}>取消</button>
+          <button type="submit" className="btn primary" disabled={!canSave}>保存修改</button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -580,11 +685,32 @@ function PlanningView(props: {
   runBackendStep: (step: WorkflowStep, payload?: Record<string, unknown>) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
   confirmBreakthroughKeywords: (keywords: string[]) => Promise<void>;
+  createCustomSource: (payload: CustomSourcePayload) => Promise<void>;
+  updateCustomSource: (sourceId: string, payload: CustomSourcePayload) => Promise<void>;
+  deleteCustomSource: (sourceId: string) => Promise<void>;
   setCurrent: (view: AppView) => void;
   openDetail: (step: EditableStep, item: ContentItem) => void;
 }) {
-  const { project, data, tab, setTab, selectedPlans, setSelectedPlans, runBackendStep, confirmBackendStep, confirmBreakthroughKeywords, setCurrent, openDetail } = props;
+  const {
+    project,
+    data,
+    tab,
+    setTab,
+    selectedPlans,
+    setSelectedPlans,
+    runBackendStep,
+    confirmBackendStep,
+    confirmBreakthroughKeywords,
+    createCustomSource,
+    updateCustomSource,
+    deleteCustomSource,
+    setCurrent,
+    openDetail
+  } = props;
   const [regenerateStep, setRegenerateStep] = useState<WorkflowStep | null>(null);
+  const [customModal, setCustomModal] = useState<{ mode: "create" | "edit" | "copy"; item?: ContentItem } | null>(null);
+  const [deleteCustomItem, setDeleteCustomItem] = useState<ContentItem | null>(null);
+  const [expandedPlanGroups, setExpandedPlanGroups] = useState<Set<string>>(new Set());
   const [selectedBreakthroughKeywords, setSelectedBreakthroughKeywords] = useState<Set<string>>(new Set(data.confirmedBreakthroughKeywords));
   const backendStep: WorkflowStep = tab === "matrix" ? "matrix" : "breakthrough";
   const stepState = project.steps[backendStep];
@@ -641,6 +767,21 @@ function PlanningView(props: {
     await runBackendStep("brief", { selected_sources: pendingBriefSources.map(toSourcePayload) });
     setCurrent("brief");
   }
+  async function submitCustomSource(payload: CustomSourcePayload) {
+    if (customModal?.mode === "edit" && customModal.item) {
+      await updateCustomSource(customModal.item.sourceId, payload);
+    } else {
+      await createCustomSource(payload);
+    }
+    setCustomModal(null);
+  }
+  async function confirmDeleteCustomSource() {
+    if (!deleteCustomItem) return;
+    const staleId = deleteCustomItem.id;
+    await deleteCustomSource(deleteCustomItem.sourceId);
+    setSelectedPlans(current => new Set([...current].filter(id => id !== staleId)));
+    setDeleteCustomItem(null);
+  }
   function setGroupSelection(groupedRows: ContentItem[], selected: boolean) {
     setSelectedPlans(current => {
       const next = new Set(current);
@@ -658,6 +799,9 @@ function PlanningView(props: {
       else next.delete(keyword);
       return next;
     });
+  }
+  function togglePlanGroup(groupKey: string) {
+    setExpandedPlanGroups(current => toggleSet(current, groupKey));
   }
   const breakthroughRunPayload = backendStep === "breakthrough" ? { confirmed_keywords: confirmedKeywordList } : undefined;
   return (
@@ -711,6 +855,26 @@ function PlanningView(props: {
           </div>
         </div>
       )}
+      {customModal && (
+        <CustomSourceModal
+          mode={customModal.mode}
+          item={customModal.item}
+          onClose={() => setCustomModal(null)}
+          onSubmit={(payload) => void submitCustomSource(payload)}
+        />
+      )}
+      {deleteCustomItem && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-custom-title">
+            <h2 id="delete-custom-title">删除自定义文章？</h2>
+            <p>这只会删除规划页里的自定义文章项，不会删除已经生成的 Brief 或正文。取消则不会做任何更改。</p>
+            <div className="actions end">
+              <button className="btn" onClick={() => setDeleteCustomItem(null)}>取消</button>
+              <button className="btn primary" onClick={() => void confirmDeleteCustomSource()}>确认删除</button>
+            </div>
+          </div>
+        </div>
+      )}
       <StepProgressPanel project={project} steps={[backendStep]} />
       <div className="tabs">
         <button className={tab === "matrix" ? "active" : ""} onClick={() => setTab("matrix")}>内容矩阵</button>
@@ -747,29 +911,62 @@ function PlanningView(props: {
         </div>
       </div>
       <JobProgress job={latestJob(project, "brief")} />
+      <CustomPlanningPanel
+        items={data.customPlans}
+        selectedPlans={selectedPlans}
+        briefBySource={briefBySource}
+        onAdd={() => setCustomModal({ mode: "create" })}
+        onEdit={(item) => setCustomModal({ mode: "edit", item })}
+        onDelete={(item) => setDeleteCustomItem(item)}
+        onSelectionChange={setGroupSelection}
+        onToggle={(item) => setSelectedPlans(current => toggleSet(current, item.id))}
+      />
       {rows.length ? (
         <div className="keyword-groups">
-          {Object.entries(groupBy(rows, "keyword")).map(([keyword, groupedRows]) => (
-            <Panel
-              key={keyword}
-              title={keyword}
-              icon={<Search size={16} />}
-              aside={<GroupSelectAside rows={groupedRows} selectedPlans={selectedPlans} onChange={setGroupSelection} />}
-            >
-              <div className="plan-list">
-                {groupedRows.map(item => (
-                  <PlanRow
-                    key={item.id}
-                    item={item}
-                    selected={selectedPlans.has(item.id)}
-                    briefStatus={briefBySource.get(item.sourceId)?.status}
-                    onToggle={() => setSelectedPlans(current => toggleSet(current, item.id))}
-                    onOpen={() => openDetail(item.sourceStep === "breakthrough" ? "breakthrough" : "matrix", item)}
+          {Object.entries(groupBy(rows, "keyword")).map(([keyword, groupedRows]) => {
+            const groupKey = `${backendStep}:${keyword}`;
+            const expanded = expandedPlanGroups.has(groupKey);
+            return (
+              <Panel
+                key={keyword}
+                title={keyword}
+                icon={<Search size={16} />}
+                aside={
+                  <PlanGroupAside
+                    rows={groupedRows}
+                    selectedPlans={selectedPlans}
+                    expanded={expanded}
+                    onSelectionChange={setGroupSelection}
+                    onToggleExpanded={() => togglePlanGroup(groupKey)}
                   />
-                ))}
-              </div>
-            </Panel>
-          ))}
+                }
+              >
+                {expanded ? (
+                  <div className="plan-list">
+                    {groupedRows.map(item => (
+                      <PlanRow
+                        key={item.id}
+                        item={item}
+                        selected={selectedPlans.has(item.id)}
+                        briefStatus={briefBySource.get(item.sourceId)?.status}
+                        onToggle={() => setSelectedPlans(current => toggleSet(current, item.id))}
+                        onOpen={() => openDetail(item.sourceStep === "breakthrough" ? "breakthrough" : "matrix", item)}
+                        onCopy={() => setCustomModal({ mode: "copy", item })}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <PlanGroupSummary
+                    keyword={keyword}
+                    rows={groupedRows}
+                    selectedPlans={selectedPlans}
+                    briefBySource={briefBySource}
+                    onExpand={() => togglePlanGroup(groupKey)}
+                  />
+                )}
+              </Panel>
+            );
+          })}
         </div>
       ) : (
         <Panel title={isRunning ? "正在生成规划" : isBlocked ? "需要确认关键词" : stepState.status === "failed" ? "规划生成失败" : "暂无规划结果"} icon={isRunning ? <Loader2 className="spin" size={16} /> : isBlocked ? <CircleAlert size={16} /> : <Route size={16} />}>
@@ -834,6 +1031,105 @@ function BreakthroughKeywordSelection({
         <EmptyPanelText text="内容矩阵里暂未识别到可用于逐词击破的关键词。请先生成或重新生成内容矩阵。" />
       )}
     </Panel>
+  );
+}
+
+function CustomPlanningPanel({
+  items,
+  selectedPlans,
+  briefBySource,
+  onAdd,
+  onEdit,
+  onDelete,
+  onSelectionChange,
+  onToggle
+}: {
+  items: ContentItem[];
+  selectedPlans: Set<string>;
+  briefBySource: Map<string, ContentItem>;
+  onAdd: () => void;
+  onEdit: (item: ContentItem) => void;
+  onDelete: (item: ContentItem) => void;
+  onSelectionChange: (rows: ContentItem[], selected: boolean) => void;
+  onToggle: (item: ContentItem) => void;
+}) {
+  return (
+    <Panel
+      title="自定义文章"
+      icon={<Plus size={16} />}
+      aside={
+        <div className="actions">
+          {items.length > 0 && <GroupSelectAside rows={items} selectedPlans={selectedPlans} onChange={onSelectionChange} />}
+          <button className="btn primary" onClick={onAdd}><Plus size={15} />新增自定义文章</button>
+        </div>
+      }
+    >
+      {items.length ? (
+        <div className="plan-list">
+          {items.map(item => {
+            const briefStatus = briefBySource.get(item.sourceId)?.status;
+            return (
+              <PlanRow
+                key={item.id}
+                item={item}
+                selected={selectedPlans.has(item.id)}
+                briefStatus={briefStatus}
+                onToggle={() => onToggle(item)}
+                onEdit={() => onEdit(item)}
+                onDelete={() => onDelete(item)}
+                editDisabled={Boolean(briefStatus)}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyPanelText text="可以在这里手动添加文章标题，后台会自动补关键词和文章类型，再和矩阵/逐词击破规划一起勾选生成 Brief。" />
+      )}
+    </Panel>
+  );
+}
+
+function CustomSourceModal({
+  mode,
+  item,
+  onClose,
+  onSubmit
+}: {
+  mode: "create" | "edit" | "copy";
+  item?: ContentItem;
+  onClose: () => void;
+  onSubmit: (payload: CustomSourcePayload) => void;
+}) {
+  const [title, setTitle] = useState(item?.title || "");
+  const canSubmit = Boolean(title.trim());
+  const modalTitle = mode === "edit" ? "编辑自定义文章" : mode === "copy" ? "复制为自定义文章" : "新增自定义文章";
+
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSubmit) return;
+    onSubmit({
+      title: title.trim(),
+      raw: customSourceRawFor(mode, item)
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="confirm-modal custom-source-modal" role="dialog" aria-modal="true" aria-labelledby="custom-source-title" onSubmit={submit}>
+        <h2 id="custom-source-title">{modalTitle}</h2>
+        <p>只需要输入文章标题；后台会根据项目资料和已有规划自动补齐关键词和文章类型。正文仍需要先经过 Brief 审核。</p>
+        <div className="form-grid">
+          <label className="field-block full">
+            <span>标题</span>
+            <input value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：企业如何选择 GEO 内容生产工具" />
+          </label>
+        </div>
+        <div className="actions end">
+          <button type="button" className="btn" onClick={onClose}>取消</button>
+          <button type="submit" className="btn primary" disabled={!canSubmit}>保存自定义文章</button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -1078,6 +1374,59 @@ function LibraryView({ project, data, group, setGroup, outputs, logs, openDetail
   );
 }
 
+function PlanGroupAside({
+  rows,
+  selectedPlans,
+  expanded,
+  onSelectionChange,
+  onToggleExpanded
+}: {
+  rows: ContentItem[];
+  selectedPlans: Set<string>;
+  expanded: boolean;
+  onSelectionChange: (rows: ContentItem[], selected: boolean) => void;
+  onToggleExpanded: () => void;
+}) {
+  return (
+    <div className="plan-group-actions">
+      <GroupSelectAside rows={rows} selectedPlans={selectedPlans} onChange={onSelectionChange} />
+      <button className={`btn compact dropdown-toggle ${expanded ? "open" : ""}`} onClick={onToggleExpanded}>
+        <ChevronDown size={15} />
+        {expanded ? "收起" : "展开"}
+      </button>
+    </div>
+  );
+}
+
+function PlanGroupSummary({
+  keyword,
+  rows,
+  selectedPlans,
+  briefBySource,
+  onExpand
+}: {
+  keyword: string;
+  rows: ContentItem[];
+  selectedPlans: Set<string>;
+  briefBySource: Map<string, ContentItem>;
+  onExpand: () => void;
+}) {
+  const selectedCount = rows.filter(item => selectedPlans.has(item.id)).length;
+  const briefCount = rows.filter(item => briefBySource.has(item.sourceId)).length;
+  const typePreview = uniqueStrings(rows.map(item => item.type)).slice(0, 4).join("、");
+  const titlePreview = rows.slice(0, 2).map(item => item.title).join(" / ");
+  return (
+    <button className="plan-group-summary" onClick={onExpand}>
+      <div>
+        <strong>{keyword}</strong>
+        <span>{rows.length} 条规划，已选 {selectedCount} 条，已生成 Brief {briefCount} 条。</span>
+        <p>{typePreview || "待识别类型"}{titlePreview ? `｜${clampText(titlePreview, 84)}` : ""}</p>
+      </div>
+      <span className="summary-cta">展开规划</span>
+    </button>
+  );
+}
+
 function GroupSelectAside({
   rows,
   selectedPlans,
@@ -1104,13 +1453,21 @@ function PlanRow({
   selected,
   briefStatus,
   onToggle,
-  onOpen
+  onOpen,
+  onCopy,
+  onEdit,
+  onDelete,
+  editDisabled = false
 }: {
   item: ContentItem;
   selected: boolean;
   briefStatus?: string;
   onToggle: () => void;
-  onOpen: () => void;
+  onOpen?: () => void;
+  onCopy?: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  editDisabled?: boolean;
 }) {
   return (
     <article className={`plan-row ${selected ? "selected" : ""}`}>
@@ -1126,7 +1483,12 @@ function PlanRow({
           <Chip text={item.used} />
         </div>
       </div>
-      <button className="btn" onClick={onOpen}><BookOpen size={15} />查阅/编辑</button>
+      <div className="row-actions">
+        {onOpen && <button className="btn" onClick={onOpen}><BookOpen size={15} />查阅/编辑</button>}
+        {onCopy && <button className="btn" onClick={onCopy}><Copy size={15} />复制为自定义</button>}
+        {onEdit && <button className="btn" disabled={editDisabled} title={editDisabled ? "已生成 Brief 后请在 Brief 审核页修改" : ""} onClick={onEdit}><PenLine size={15} />编辑</button>}
+        {onDelete && <button className="btn" onClick={onDelete}><Trash2 size={15} />删除</button>}
+      </div>
     </article>
   );
 }
@@ -1335,9 +1697,10 @@ function EmptyPanelText({ text }: { text: string }) {
 }
 
 interface DerivedData {
-  intakeRows: Array<{ id: string; field: string; value: string; source: string; confidence: string; status: string }>;
+  intakeRows: IntakeRow[];
   matrixPlans: ContentItem[];
   breakthroughPlans: ContentItem[];
+  customPlans: ContentItem[];
   matrixKeywords: string[];
   confirmedBreakthroughKeywords: string[];
   plans: ContentItem[];
@@ -1348,13 +1711,14 @@ interface DerivedData {
 }
 
 function emptyDerivedData(): DerivedData {
-  return { intakeRows: [], matrixPlans: [], breakthroughPlans: [], matrixKeywords: [], confirmedBreakthroughKeywords: [], plans: [], briefs: [], articles: [], rewrites: [], archiveCount: 0 };
+  return { intakeRows: [], matrixPlans: [], breakthroughPlans: [], customPlans: [], matrixKeywords: [], confirmedBreakthroughKeywords: [], plans: [], briefs: [], articles: [], rewrites: [], archiveCount: 0 };
 }
 
 function deriveProjectData(project: Project): DerivedData {
   const matrixPlans = normalizeItems(project.steps.matrix.output, "matrix");
   const matrixKeywordOptions = extractMatrixKeywordOptions(project.steps.matrix.output);
   const breakthroughPlans = normalizeItems(project.steps.breakthrough.output, "breakthrough");
+  const customPlans = normalizeItems({ items: project.custom_sources || [] }, "custom");
   const briefs = normalizeItems(project.steps.brief.output, "brief");
   const articles = normalizeItems(project.steps.article.output, "article");
   const rewrites = normalizeItems(project.steps.rewrite.output, "rewrite");
@@ -1362,9 +1726,10 @@ function deriveProjectData(project: Project): DerivedData {
     intakeRows: normalizeIntake(project.steps.intake.output),
     matrixPlans,
     breakthroughPlans,
+    customPlans,
     matrixKeywords: matrixKeywordOptions.length ? matrixKeywordOptions : uniqueKeywords(matrixPlans),
     confirmedBreakthroughKeywords: readConfirmedBreakthroughKeywords(project.steps.matrix.output),
-    plans: [...matrixPlans, ...breakthroughPlans],
+    plans: [...matrixPlans, ...breakthroughPlans, ...customPlans],
     briefs,
     articles,
     rewrites,
@@ -1729,6 +2094,7 @@ function stepLabel(step: string): string {
     intake: "抽取表",
     matrix: "内容矩阵",
     breakthrough: "逐词击破",
+    custom: "自定义文章",
     brief: "Brief",
     article: "正文",
     rewrite: "改写稿"
@@ -1806,6 +2172,7 @@ function briefItemStatusLabel(status: string): string {
 
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
+    ready: "待生成 Brief",
     pending: "待处理",
     queued: "排队中",
     running: "生成中",
@@ -1821,11 +2188,40 @@ function statusLabel(status: string): string {
   return labels[status] || status;
 }
 
+function intakeRowPersisted(row: IntakeRow): boolean {
+  return row.status === "已确认" || row.status === "已人工修改";
+}
+
 function toggleSet(current: Set<string>, id: string): Set<string> {
   const next = new Set(current);
   if (next.has(id)) next.delete(id);
   else next.add(id);
   return next;
+}
+
+function customSourceRawFor(mode: "create" | "edit" | "copy", item?: ContentItem): Record<string, unknown> | undefined {
+  if (mode !== "copy" || !item) return undefined;
+  return {
+    copied_from: {
+      source_id: item.sourceId,
+      source_step: item.sourceStep,
+      keyword: item.keyword,
+      type: item.type,
+      title: item.title,
+      channel: item.channel,
+      channels: itemChannels(item),
+      brief_focus: readString(item.raw, ["brief_focus", "briefFocus"], item.role)
+    }
+  };
+}
+
+function itemChannels(item: ContentItem): string[] {
+  const rawChannels = item.raw.channels;
+  if (Array.isArray(rawChannels)) {
+    return rawChannels.map(formatValue).filter(Boolean);
+  }
+  if (!item.channel || item.channel === "未标注渠道") return [];
+  return item.channel.split("、").map(channel => channel.trim()).filter(Boolean);
 }
 
 function toSourcePayload(item: ContentItem): Record<string, unknown> {
@@ -1837,6 +2233,8 @@ function toSourcePayload(item: ContentItem): Record<string, unknown> {
     title: item.title,
     role: item.role,
     channel: item.channel,
+    channels: itemChannels(item),
+    brief_focus: readString(item.raw, ["brief_focus", "briefFocus"], item.role),
     raw: item.raw
   };
 }

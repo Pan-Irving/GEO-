@@ -45,12 +45,40 @@ export interface Job {
   updated_at: string;
 }
 
+export interface CustomSource {
+  id: string;
+  source_id: string;
+  source_step: "custom";
+  keyword: string;
+  type: string;
+  title: string;
+  role: string;
+  brief_focus: string;
+  channel: string;
+  channels: string[];
+  status: "ready" | "completed";
+  created_at: string;
+  updated_at: string;
+  raw: Record<string, unknown>;
+}
+
+export interface CustomSourcePayload {
+  title: string;
+  keyword?: string;
+  type?: string;
+  brief_focus?: string;
+  channel?: string;
+  channels?: string[];
+  raw?: Record<string, unknown>;
+}
+
 export interface Project {
   id: string;
   name: string;
   created_at: string;
   updated_at: string;
   materials: Material[];
+  custom_sources: CustomSource[];
   steps: Record<WorkflowStep, StepState>;
   jobs: Job[];
 }

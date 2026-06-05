@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.models.schemas import Job, Material, Project, STEP_ORDER, StepState, WorkflowStep
+from app.models.schemas import CustomSource, Job, Material, Project, STEP_ORDER, StepState, WorkflowStep
 from app.utils.files import safe_filename, slugify, today, utc_now
 
 
@@ -84,6 +84,7 @@ class ProjectRepository:
         if not path.exists():
             raise FileNotFoundError(f"Project not found: {project_id}")
         data = json.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("custom_sources", [])
         for step in STEP_ORDER:
             data.setdefault("steps", {}).setdefault(step, StepState().model_dump())
         normalize_blocked_step_states(data)
@@ -118,6 +119,55 @@ class ProjectRepository:
         project = self.load_project(project_id)
         project.materials = [material if item.id == material.id else item for item in project.materials]
         self.save_project(project)
+        return project
+
+    def create_custom_source(self, project_id: str, payload: dict[str, Any]) -> Project:
+        project = self.load_project(project_id)
+        source = normalize_custom_source(project, payload)
+        if any(item.source_id == source.source_id for item in project.custom_sources):
+            raise ValueError("同标题的自定义文章已存在。")
+        project.custom_sources.append(source)
+        self.save_project(project)
+        self.log(project_id, f"新增自定义文章规划：{source.title}")
+        return project
+
+    def update_custom_source(self, project_id: str, source_id: str, payload: dict[str, Any]) -> Project:
+        project = self.load_project(project_id)
+        target_id = slugify(source_id, fallback="custom")
+        if custom_source_has_brief(project, target_id):
+            raise ValueError("该自定义文章已生成 Brief，请在 Brief 审核页修改。")
+        updated: list[CustomSource] = []
+        found = False
+        for source in project.custom_sources:
+            if source.source_id != target_id:
+                updated.append(source)
+                continue
+            next_source = normalize_custom_source(
+                project,
+                payload,
+                created_at=source.created_at,
+                raw={**source.raw, **payload.get("raw", {})} if isinstance(payload.get("raw"), dict) else source.raw,
+            )
+            if any(item.source_id == next_source.source_id for item in project.custom_sources if item.source_id != target_id):
+                raise ValueError("同标题的自定义文章已存在。")
+            updated.append(next_source)
+            found = True
+        if not found:
+            raise FileNotFoundError(f"Custom source not found: {source_id}")
+        project.custom_sources = updated
+        self.save_project(project)
+        self.log(project_id, f"更新自定义文章规划：{target_id}")
+        return project
+
+    def delete_custom_source(self, project_id: str, source_id: str) -> Project:
+        project = self.load_project(project_id)
+        target_id = slugify(source_id, fallback="custom")
+        before = len(project.custom_sources)
+        project.custom_sources = [source for source in project.custom_sources if source.source_id != target_id]
+        if len(project.custom_sources) == before:
+            raise FileNotFoundError(f"Custom source not found: {source_id}")
+        self.save_project(project)
+        self.log(project_id, f"删除自定义文章规划：{target_id}")
         return project
 
     def update_step(
@@ -209,6 +259,19 @@ class ProjectRepository:
         output_root.mkdir(parents=True, exist_ok=True)
         path = output_root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def rewrite_latest_output(self, project: Project, relative_path: str, content: str) -> Path:
+        root = self.outputs_dir(project.id)
+        matches: list[Path] = []
+        if root.exists():
+            for path in root.rglob(Path(relative_path).name):
+                if path.is_file() and str(path.relative_to(root)).endswith(relative_path):
+                    matches.append(path)
+        if not matches:
+            return self.write_output(project, relative_path, content)
+        path = max(matches, key=lambda item: item.stat().st_mtime)
         path.write_text(content, encoding="utf-8")
         return path
 
@@ -304,3 +367,187 @@ def blocked_step_label(step: str) -> str:
         "article": "正文",
         "rewrite": "改写稿",
     }.get(step, step)
+
+
+def normalize_custom_source(
+    project: Project,
+    payload: dict[str, Any],
+    *,
+    created_at: str | None = None,
+    raw: dict[str, Any] | None = None,
+) -> CustomSource:
+    title = required_custom_text(payload, "title", "标题")
+    raw_payload = raw if raw is not None else payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    copied_source = copied_custom_source(project, raw_payload)
+    keyword = (
+        clean_custom_text(payload.get("keyword"))
+        or first_custom_text(copied_source, ["keyword", "target_keyword", "main_keyword", "关键词"])
+        or infer_custom_keyword(project, title)
+    )
+    article_type = (
+        clean_custom_text(payload.get("type"))
+        or first_custom_text(copied_source, ["type", "article_type", "main_article_type", "文章类型"])
+        or infer_custom_article_type(title)
+    )
+    channels = normalize_custom_channels(payload)
+    if not channels:
+        copied_channels = first_custom_text(copied_source, ["channels", "channel", "recommended_channels", "发布渠道"])
+        channels = [copied_channels] if copied_channels else []
+    channel = clean_custom_text(payload.get("channel"))
+    if not channel and channels:
+        channel = channels[0]
+    brief_focus = clean_custom_text(payload.get("brief_focus")) or first_custom_text(copied_source, ["brief_focus", "role", "summary", "主要作用"])
+    custom_id = custom_source_id(title)
+    stored_raw = {
+        **raw_payload,
+        "inferred": {
+            "keyword": keyword,
+            "type": article_type,
+            "source": "copied_source" if copied_source else "project_context",
+        },
+    }
+    return CustomSource(
+        id=custom_id,
+        source_id=custom_id,
+        keyword=keyword,
+        type=article_type,
+        title=title,
+        role="用户自定义选题",
+        brief_focus=brief_focus,
+        channel=channel,
+        channels=channels,
+        status="ready",
+        created_at=created_at or utc_now(),
+        updated_at=utc_now(),
+        raw=stored_raw,
+    )
+
+
+def custom_source_id(title: str) -> str:
+    return slugify(f"custom-{title}", fallback=f"custom-{uuid.uuid4().hex[:8]}")
+
+
+def required_custom_text(payload: dict[str, Any], key: str, label: str) -> str:
+    value = clean_custom_text(payload.get(key))
+    if not value:
+        raise ValueError(f"请填写自定义文章的{label}。")
+    return value
+
+
+def clean_custom_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def first_custom_text(row: dict[str, Any], keys: list[str]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return clean_custom_text(value)
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, list):
+            text = "、".join(clean_custom_text(item) for item in value if clean_custom_text(item))
+            if text:
+                return text
+    return ""
+
+
+def copied_custom_source(project: Project, raw: dict[str, Any]) -> dict[str, Any]:
+    copied = raw.get("copied_from") if isinstance(raw, dict) else None
+    if not isinstance(copied, dict):
+        return {}
+    copied_id = clean_custom_text(copied.get("source_id") or copied.get("id"))
+    if not copied_id:
+        return copied
+    for step in ("matrix", "breakthrough"):
+        for row in iter_custom_dicts(project.steps[step].output):
+            row_id = clean_custom_text(row.get("source_id") or row.get("sourceId") or row.get("id"))
+            if row_id == copied_id:
+                return {**row, **copied}
+    return copied
+
+
+def infer_custom_keyword(project: Project, title: str) -> str:
+    normalized_title = compact_custom_text(title)
+    for keyword in known_custom_keywords(project):
+        if compact_custom_text(keyword) in normalized_title:
+            return keyword
+    return title[:40]
+
+
+def known_custom_keywords(project: Project) -> list[str]:
+    values: list[str] = []
+    keyword_keys = {"keyword", "target_keyword", "main_keyword", "main_keyword_or_cluster", "keyword_or_cluster", "confirmed_keywords", "关键词", "主攻关键词"}
+    for step in ("matrix", "breakthrough"):
+        for row in iter_custom_dicts(project.steps[step].output):
+            for key in keyword_keys:
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    values.append(clean_custom_text(value))
+                elif isinstance(value, list):
+                    values.extend(clean_custom_text(item) for item in value if clean_custom_text(item))
+    deduped: list[str] = []
+    for value in values:
+        if value and value not in deduped:
+            deduped.append(value)
+    return sorted(deduped, key=len, reverse=True)
+
+
+def infer_custom_article_type(title: str) -> str:
+    normalized = compact_custom_text(title)
+    rules = [
+        ("FAQ问答文", ["faq", "问答", "问题", "答疑", "常见问题"]),
+        ("榜单推荐文", ["榜单", "推荐", "排行", "排名", "清单"]),
+        ("横评对比文", ["横评", "对比", "比较", "区别", "差异", "哪个好"]),
+        ("场景选购文", ["场景", "选购", "怎么选", "如何选", "如何选择", "指南", "攻略"]),
+        ("产品证据文", ["证据", "测评", "实测", "案例", "参数", "认证", "报告"]),
+        ("支柱标准文", ["标准", "全面解析", "系统解析", "长期使用", "全解析"]),
+    ]
+    for article_type, markers in rules:
+        if any(marker in normalized for marker in markers):
+            return article_type
+    return "自定义命题文"
+
+
+def compact_custom_text(value: str) -> str:
+    return clean_custom_text(value).replace(" ", "").lower()
+
+
+def iter_custom_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from iter_custom_dicts(nested)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_custom_dicts(item)
+
+
+def normalize_custom_channels(payload: dict[str, Any]) -> list[str]:
+    value = payload.get("channels")
+    if isinstance(value, list):
+        channels = [clean_custom_text(item) for item in value]
+    else:
+        channel = clean_custom_text(value)
+        channels = [channel] if channel else []
+    if not channels:
+        single = clean_custom_text(payload.get("channel"))
+        channels = [single] if single else []
+    deduped: list[str] = []
+    for channel in channels:
+        if channel and channel not in deduped:
+            deduped.append(channel)
+    return deduped[:8]
+
+
+def custom_source_has_brief(project: Project, source_id: str) -> bool:
+    brief_state = project.steps.get("brief")
+    output = brief_state.output if brief_state else {}
+    items = output.get("items") if isinstance(output, dict) else None
+    if not isinstance(items, list):
+        return False
+    return any(isinstance(item, dict) and str(item.get("source_id") or "") == source_id for item in items)

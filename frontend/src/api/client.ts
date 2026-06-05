@@ -1,4 +1,4 @@
-import type { Project, WorkflowStep } from "./types";
+import type { CustomSourcePayload, Project, WorkflowStep } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -53,6 +53,20 @@ export const api = {
     request<{ project: Project }>(`/api/projects/${projectId}/planning/breakthrough-keywords`, {
       method: "POST",
       body: JSON.stringify({ keywords })
+    }),
+  createCustomSource: (projectId: string, payload: CustomSourcePayload) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/custom-sources`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateCustomSource: (projectId: string, sourceId: string, payload: CustomSourcePayload) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/custom-sources/${encodeURIComponent(sourceId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deleteCustomSource: (projectId: string, sourceId: string) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/custom-sources/${encodeURIComponent(sourceId)}`, {
+      method: "DELETE"
     }),
   updateItem: (projectId: string, step: WorkflowStep, itemId: string, payload: Record<string, unknown>) =>
     request<{ project: Project }>(`/api/projects/${projectId}/steps/${step}/items/${encodeURIComponent(itemId)}`, {

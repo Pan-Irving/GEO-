@@ -7,6 +7,7 @@ from app.core.config import Settings, get_settings
 from app.models.schemas import (
     BreakthroughKeywordSelectionRequest,
     ConfirmStepRequest,
+    CustomSourceRequest,
     HealthResponse,
     ProjectCreate,
     RunStepRequest,
@@ -129,6 +130,47 @@ def confirm_breakthrough_keywords(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WorkflowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/custom-sources")
+def create_custom_source(
+    project_id: str,
+    payload: CustomSourceRequest,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    try:
+        return {"project": repository.create_custom_source(project_id, payload.model_dump())}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/projects/{project_id}/custom-sources/{source_id}")
+def update_custom_source(
+    project_id: str,
+    source_id: str,
+    payload: CustomSourceRequest,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    try:
+        return {"project": repository.update_custom_source(project_id, source_id, payload.model_dump())}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/projects/{project_id}/custom-sources/{source_id}")
+def delete_custom_source(
+    project_id: str,
+    source_id: str,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    try:
+        return {"project": repository.delete_custom_source(project_id, source_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.patch("/projects/{project_id}/steps/{step}/items/{item_id}")

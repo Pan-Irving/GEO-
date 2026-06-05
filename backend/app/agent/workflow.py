@@ -509,11 +509,14 @@ class AgentWorkflow:
         self.repository.log(project_id, f"确认进入逐词击破关键词：{', '.join(normalized_keywords)}")
 
     def update_item(self, project_id: str, step: WorkflowStep, item_id: str, payload: dict[str, Any]) -> None:
-        if step not in {"matrix", "breakthrough", "brief", "article", "rewrite"}:
+        if step not in {"intake", "matrix", "breakthrough", "brief", "article", "rewrite"}:
             raise WorkflowError(f"该步骤不支持单篇编辑：{step}")
         project = self.repository.load_project(project_id)
         output = dict(project.steps[step].output)
         updates = dict(payload)
+        if step == "intake":
+            self._update_intake_item(project_id, item_id, updates)
+            return
         source_id = str(updates.get("source_id") or item_id)
         updated_brief: dict[str, Any] | None = None
         updated_item: dict[str, Any] | None = None
@@ -570,6 +573,38 @@ class AgentWorkflow:
                 )
                 self.repository.log(project_id, f"Brief 修改后标记旧正文：{stale_count} 篇")
         self.repository.log(project_id, f"保存单篇修改：{STEP_LABELS.get(step, step)} / {item_id}")
+
+    def _update_intake_item(self, project_id: str, item_id: str, updates: dict[str, Any]) -> None:
+        unsupported = set(updates) - {"value", "status"}
+        if unsupported:
+            raise WorkflowError(f"项目信息抽取表只支持修改推断值或确认状态：{', '.join(sorted(unsupported))}")
+        project = self.repository.load_project(project_id)
+        output = dict(project.steps["intake"].output)
+        rows = output.get("project_intake_table")
+        if not isinstance(rows, list):
+            raise WorkflowError("项目信息抽取表不存在，请先生成抽取表。")
+        next_rows: list[dict[str, Any]] = []
+        changed = False
+        for row in rows:
+            current = dict(row) if isinstance(row, dict) else {}
+            if str(current.get("id") or "") != item_id:
+                next_rows.append(current)
+                continue
+            if "value" in updates:
+                current["value"] = str(updates.get("value") or "").strip()
+                current["status"] = "已人工修改"
+            elif updates.get("status") == "已确认":
+                current["status"] = "已确认"
+            else:
+                raise WorkflowError("项目信息确认状态只支持：已确认")
+            next_rows.append(current)
+            changed = True
+        if not changed:
+            raise WorkflowError(f"未找到项目信息字段：{item_id}")
+        output["project_intake_table"] = next_rows
+        saved = self.repository.update_step(project_id, "intake", output=output, error=project.steps["intake"].error)
+        self.repository.rewrite_latest_output(saved, OUTPUT_FILES["intake"], result_to_markdown("intake", output))
+        self.repository.log(project_id, f"保存项目信息修改：{item_id}")
 
     def _run_step(self, project_id: str, step: WorkflowStep, payload: dict[str, Any]) -> dict[str, Any]:
         client = OpenAIWorkflowClient(self.settings)
@@ -1401,6 +1436,7 @@ def build_selection_prompt_blocks(step: WorkflowStep, payload: dict[str, Any]) -
             return [
                 "# 选中待生成 Brief 的文章规划\n" + json.dumps(selected, ensure_ascii=False, indent=2)[:50000],
                 "# 生成范围\n本次只针对上方 selected_sources 生成 Brief。未选中的文章不要输出。输出 JSON 对象，items 数组中每个 item 必须保留 source_id、source_step、keyword、type、title，并将完整 Brief 放在 markdown 字段。",
+                "# 自定义文章规则\nsource_step 为 custom 的项目由用户手动创建，title 是用户指定的目标选题，必须作为 Brief 的主标题和核心方向，不要替换为其他题目；keyword、type 可能是后台根据标题和项目上下文自动推断的辅助信息，brief_focus、channel/channels 如存在则作为补充约束使用。",
             ]
     if step == "article":
         selected = payload.get("selected_briefs")
