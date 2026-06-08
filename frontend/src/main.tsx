@@ -32,8 +32,10 @@ import type { CustomSourcePayload, Project, WorkflowStep } from "./api/types";
 import "./styles/app.css";
 
 type AppView = "dashboard" | "upload" | "planning" | "brief" | "article" | "rewrite" | "library";
-type PlanningTab = "matrix" | "breakthrough";
+type PlanningTab = "matrix" | "breakthrough" | "custom";
 type EditableStep = "matrix" | "breakthrough" | "brief" | "article" | "rewrite";
+type BriefModifiedFilter = "all" | "modified" | "unmodified";
+type BriefArticleFilter = "all" | "generated" | "not_generated" | "needs_update" | "failed";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -59,6 +61,16 @@ interface ContentItem {
   raw: AnyRecord;
 }
 
+interface MatrixIntentGroup {
+  id: string;
+  name: string;
+  keywords: string[];
+  userQuestion: string;
+  userStage: string;
+  articleTypes: string[];
+  raw: AnyRecord;
+}
+
 interface IntakeRow {
   id: string;
   field: string;
@@ -72,6 +84,20 @@ interface DetailState {
   step: EditableStep;
   item: ContentItem;
 }
+
+interface BriefFilterState {
+  keyword: string;
+  articleType: string;
+  briefModified: BriefModifiedFilter;
+  articleStatus: BriefArticleFilter;
+}
+
+const emptyBriefFilters: BriefFilterState = {
+  keyword: "all",
+  articleType: "all",
+  briefModified: "all",
+  articleStatus: "all"
+};
 
 const appSteps: Array<{ id: AppView; title: string; desc: string; backendStep?: WorkflowStep }> = [
   { id: "dashboard", title: "项目看板", desc: "整体产出与进度" },
@@ -105,6 +131,7 @@ function App() {
   const [selectedPlans, setSelectedPlans] = useState<Set<string>>(new Set());
   const [selectedBriefs, setSelectedBriefs] = useState<Set<string>>(new Set());
   const [selectedArticles, setSelectedArticles] = useState<Set<string>>(new Set());
+  const [dismissedJobIds, setDismissedJobIds] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [projectName, setProjectName] = useState("GEO 内容项目");
   const [logs, setLogs] = useState("");
@@ -272,7 +299,7 @@ function App() {
     if (!project) return;
     await run(async () => {
       await api.confirmBreakthroughKeywords(project.id, keywords);
-    }, "已确认进入逐词击破的关键词。");
+    }, "已确认逐词击破关键词；内容矩阵规划仍可直接生成 Brief。");
   }
 
   async function createCustomSource(payload: CustomSourcePayload) {
@@ -370,6 +397,8 @@ function App() {
                 run={run}
                 runBackendStep={runBackendStep}
                 confirmBackendStep={confirmBackendStep}
+                dismissedJobIds={dismissedJobIds}
+                dismissJob={(jobId) => setDismissedJobIds(current => new Set([...current, jobId]))}
               />
             )}
             {current === "planning" && (
@@ -388,6 +417,8 @@ function App() {
                 deleteCustomSource={deleteCustomSource}
                 setCurrent={setCurrent}
                 openDetail={(step, item) => setDetail({ step, item })}
+                dismissedJobIds={dismissedJobIds}
+                dismissJob={(jobId) => setDismissedJobIds(current => new Set([...current, jobId]))}
               />
             )}
             {current === "brief" && (
@@ -404,6 +435,8 @@ function App() {
                 setCurrent={setCurrent}
                 openDetail={(item) => setDetail({ step: "brief", item })}
                 regenerateBrief={(item) => regenerateItem("brief", item)}
+                dismissedJobIds={dismissedJobIds}
+                dismissJob={(jobId) => setDismissedJobIds(current => new Set([...current, jobId]))}
               />
             )}
             {current === "article" && (
@@ -415,7 +448,14 @@ function App() {
                 setSelectedArticles={setSelectedArticles}
                 confirmBackendStep={confirmBackendStep}
                 openDetail={(item) => setDetail({ step: "article", item })}
+                openBriefDetail={(item) => {
+                  setCurrent("brief");
+                  setSelectedBriefs(new Set([item.id]));
+                  setDetail({ step: "brief", item });
+                }}
                 regenerateArticle={(item) => regenerateItem("article", item)}
+                dismissedJobIds={dismissedJobIds}
+                dismissJob={(jobId) => setDismissedJobIds(current => new Set([...current, jobId]))}
               />
             )}
             {current === "rewrite" && (
@@ -481,8 +521,10 @@ function UploadView(props: {
   run: (action: () => Promise<unknown>, success: string) => Promise<void>;
   runBackendStep: (step: WorkflowStep, payload?: Record<string, unknown>) => Promise<void>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
+  dismissedJobIds: Set<string>;
+  dismissJob: (jobId: string) => void;
 }) {
-  const { project, data, run, runBackendStep, confirmBackendStep } = props;
+  const { project, data, run, runBackendStep, confirmBackendStep, dismissedJobIds, dismissJob } = props;
   const [confirmRegenerateIntake, setConfirmRegenerateIntake] = useState(false);
   const [editingIntakeRow, setEditingIntakeRow] = useState<IntakeRow | null>(null);
   const allMaterialsParsed = project.materials.length > 0 && project.materials.every(material => material.status === "parsed");
@@ -544,7 +586,7 @@ function UploadView(props: {
             </div>
           </div>
         )}
-        <StepProgressPanel project={project} />
+        <StepProgressPanel project={project} dismissedJobIds={dismissedJobIds} dismissJob={dismissJob} />
         <div className="slot-grid">
           {materialSlots.map((slot, index) => {
             const materials = project.materials.filter(material => material.filename.startsWith(`${slot.id}__`));
@@ -690,6 +732,8 @@ function PlanningView(props: {
   deleteCustomSource: (sourceId: string) => Promise<void>;
   setCurrent: (view: AppView) => void;
   openDetail: (step: EditableStep, item: ContentItem) => void;
+  dismissedJobIds: Set<string>;
+  dismissJob: (jobId: string) => void;
 }) {
   const {
     project,
@@ -705,36 +749,41 @@ function PlanningView(props: {
     updateCustomSource,
     deleteCustomSource,
     setCurrent,
-    openDetail
+    openDetail,
+    dismissedJobIds,
+    dismissJob
   } = props;
   const [regenerateStep, setRegenerateStep] = useState<WorkflowStep | null>(null);
   const [customModal, setCustomModal] = useState<{ mode: "create" | "edit" | "copy"; item?: ContentItem } | null>(null);
   const [deleteCustomItem, setDeleteCustomItem] = useState<ContentItem | null>(null);
   const [expandedPlanGroups, setExpandedPlanGroups] = useState<Set<string>>(new Set());
   const [selectedBreakthroughKeywords, setSelectedBreakthroughKeywords] = useState<Set<string>>(new Set(data.confirmedBreakthroughKeywords));
-  const backendStep: WorkflowStep = tab === "matrix" ? "matrix" : "breakthrough";
-  const stepState = project.steps[backendStep];
-  const rows = tab === "matrix" ? data.matrixPlans : data.breakthroughPlans;
-  const isRunning = stepState.status === "running";
-  const blockedMessage = outputBlockerMessage(stepState.output);
+  const activeBackendStep: WorkflowStep | null = tab === "custom" ? null : tab === "matrix" ? "matrix" : "breakthrough";
+  const stepState = activeBackendStep ? project.steps[activeBackendStep] : null;
+  const rows = tab === "matrix" ? data.matrixPlans : tab === "breakthrough" ? data.breakthroughPlans : data.customPlans;
+  const isRunning = stepState?.status === "running";
+  const blockedMessage = stepState ? outputBlockerMessage(stepState.output) : "";
   const isBlocked = Boolean(blockedMessage);
   const hasRows = rows.length > 0;
-  const hasStepOutput = Object.keys(stepState.output || {}).length > 0;
-  const planningLabel = tab === "matrix" ? "内容矩阵" : "逐词击破";
+  const hasStepOutput = Boolean(stepState && Object.keys(stepState.output || {}).length > 0);
+  const planningLabel = tab === "matrix" ? "内容矩阵" : tab === "breakthrough" ? "逐词击破" : "自定义文章";
   const keywordOptions = uniqueStrings([...data.matrixKeywords, ...data.confirmedBreakthroughKeywords]);
   const selectedKeywordList = keywordOptions.filter(keyword => selectedBreakthroughKeywords.has(keyword));
   const confirmedKeywordList = data.confirmedBreakthroughKeywords;
+  const matrixGroupMeta = new Map(data.matrixIntentGroups.map(group => [group.name, group]));
+  const groupedRows = tab === "matrix" ? groupMatrixRowsByIntent(rows, data.matrixIntentGroups) : groupBy(rows, "keyword");
   const hasConfirmedBreakthroughKeywords = confirmedKeywordList.length > 0;
-  const needsBreakthroughKeywords = backendStep === "breakthrough" && !hasConfirmedBreakthroughKeywords;
-  const canRegenerateCurrentStep = hasStepOutput && !isRunning && !needsBreakthroughKeywords;
+  const needsBreakthroughKeywords = activeBackendStep === "breakthrough" && !hasConfirmedBreakthroughKeywords;
+  const canRegenerateCurrentStep = Boolean(activeBackendStep && hasStepOutput && !isRunning && !needsBreakthroughKeywords);
   const generationLocked = isRunning || needsBreakthroughKeywords;
-  const canConfirm = hasRows && stepState.status === "completed" && !needsBreakthroughKeywords;
-  const isConfirmed = stepState.status === "confirmed";
+  const canConfirm = Boolean(activeBackendStep && hasRows && stepState?.status === "completed" && !needsBreakthroughKeywords);
+  const isConfirmed = stepState?.status === "confirmed";
   const selectedPlanItems = data.plans.filter(item => selectedPlans.has(item.id));
-  const generatedBriefSourceIds = new Set(data.briefs.map(item => item.sourceId).filter(Boolean));
   const briefBySource = new Map(data.briefs.map(item => [item.sourceId, item]));
-  const pendingBriefSources = selectedPlanItems.filter(item => !generatedBriefSourceIds.has(item.sourceId));
+  const articleByBriefId = new Map(data.articles.map(item => [item.briefId || item.id, item]));
+  const pendingBriefSources = selectedPlanItems.filter(item => !briefIsGenerated(briefBySource.get(item.sourceId)));
   const selectedCount = selectedPlanItems.length;
+  const planningBriefJob = briefProgressForPlanning(project, activeBackendStep);
   const generationButtonText = selectedCount === 0
     ? "生成选中 Brief"
     : pendingBriefSources.length === 0
@@ -744,18 +793,21 @@ function PlanningView(props: {
   const emptyText = isRunning
     ? `后台 Agent 正在生成${tab === "matrix" ? "内容矩阵" : "逐词击破"}，可以点击“刷新状态”查看进度。`
     : needsBreakthroughKeywords
-      ? "请先回到内容矩阵 Tab，勾选并确认进入逐词击破的关键词。"
+      ? "逐词击破是可选增强；如需生成逐词击破规划，请先回内容矩阵 Tab 勾选并确认关键词。"
     : isBlocked
       ? blockedMessage
-      : stepState.status === "failed"
-      ? stepState.error || "任务失败，请调整后重新生成。"
-      : `点击“生成${tab === "matrix" ? "内容矩阵" : "逐词击破"}”后，这里会展示后台 Agent 的真实输出。`;
+      : stepState?.status === "failed"
+        ? stepState.error || "任务失败，请调整后重新生成。"
+        : tab === "custom"
+          ? "可以手动添加文章标题，后台会自动补关键词和文章类型，再和矩阵/逐词击破规划一起勾选生成 Brief。"
+          : `点击“生成${tab === "matrix" ? "内容矩阵" : "逐词击破"}”后，这里会展示后台 Agent 的真实输出。`;
   useEffect(() => {
     setSelectedBreakthroughKeywords(new Set(data.confirmedBreakthroughKeywords));
   }, [project.id, confirmedKeywordSignature]);
   async function confirmCurrentPlanning() {
-    await confirmBackendStep(backendStep);
-    if (backendStep === "matrix") setTab("breakthrough");
+    if (!activeBackendStep) return;
+    await confirmBackendStep(activeBackendStep);
+    if (activeBackendStep === "matrix") setTab("breakthrough");
   }
   async function confirmKeywordsForBreakthrough() {
     if (!selectedKeywordList.length) return;
@@ -803,38 +855,40 @@ function PlanningView(props: {
   function togglePlanGroup(groupKey: string) {
     setExpandedPlanGroups(current => toggleSet(current, groupKey));
   }
-  const breakthroughRunPayload = backendStep === "breakthrough" ? { confirmed_keywords: confirmedKeywordList } : undefined;
+  const breakthroughRunPayload = activeBackendStep === "breakthrough" ? { confirmed_keywords: confirmedKeywordList } : undefined;
   return (
     <div className="section-stack">
-      <div className="bulk-bar">
-        <div>
-          <strong>{tab === "matrix" ? "内容矩阵整体规划" : "逐词击破六类规划"}</strong>
-          <span>
-            {hasRows
-              ? `后台 Agent 已生成 ${rows.length} 条规划。`
-              : isRunning
-                ? "后台 Agent 正在生成，请稍等。"
-                : needsBreakthroughKeywords
-                  ? "请先在内容矩阵中确认关键词，暂未允许生成逐词击破。"
-                  : isBlocked
-                    ? "需要先补充或确认关键词，暂未生成正式规划。"
-                    : "暂无规划结果。"}
-          </span>
+      {activeBackendStep && (
+        <div className="bulk-bar">
+          <div>
+            <strong>{tab === "matrix" ? "内容矩阵整体规划" : "逐词击破六类规划"}</strong>
+            <span>
+              {hasRows
+                ? `后台 Agent 已生成 ${rows.length} 条规划。`
+                : isRunning
+                  ? "后台 Agent 正在生成，请稍等。"
+                  : needsBreakthroughKeywords
+                    ? "请先在内容矩阵中确认关键词后再生成逐词击破；内容矩阵规划可直接生成 Brief。"
+                    : isBlocked
+                      ? "需要先补充或确认关键词，暂未生成正式规划。"
+                      : "暂无规划结果。"}
+            </span>
+          </div>
+          <div className="actions">
+            <button
+              className="btn"
+              disabled={generationLocked}
+              onClick={() => {
+                if (canRegenerateCurrentStep) setRegenerateStep(activeBackendStep);
+                else void runBackendStep(activeBackendStep, breakthroughRunPayload);
+              }}
+            >
+              {isRunning ? "生成中" : needsBreakthroughKeywords ? "先确认逐词击破关键词" : canRegenerateCurrentStep ? `重新生成${planningLabel}` : `生成${planningLabel}`}
+            </button>
+            {activeBackendStep === "breakthrough" && <button className="btn primary" disabled={!canConfirm} onClick={() => void confirmCurrentPlanning()}>{isConfirmed ? "已确认当前规划" : "确认当前规划"}</button>}
+          </div>
         </div>
-        <div className="actions">
-          <button
-            className="btn"
-            disabled={generationLocked}
-            onClick={() => {
-              if (canRegenerateCurrentStep) setRegenerateStep(backendStep);
-              else void runBackendStep(backendStep, breakthroughRunPayload);
-            }}
-          >
-            {isRunning ? "生成中" : needsBreakthroughKeywords ? "先确认关键词" : canRegenerateCurrentStep ? `重新生成${planningLabel}` : `生成${planningLabel}`}
-          </button>
-          {backendStep === "breakthrough" && <button className="btn primary" disabled={!canConfirm} onClick={() => void confirmCurrentPlanning()}>{isConfirmed ? "已确认当前规划" : "确认当前规划"}</button>}
-        </div>
-      </div>
+      )}
       {regenerateStep && (
         <div className="modal-backdrop" role="presentation">
           <div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="regenerate-planning-title">
@@ -875,10 +929,12 @@ function PlanningView(props: {
           </div>
         </div>
       )}
-      <StepProgressPanel project={project} steps={[backendStep]} />
+      {activeBackendStep && <StepProgressPanel project={project} steps={[activeBackendStep]} dismissedJobIds={dismissedJobIds} dismissJob={dismissJob} />}
+      <JobProgress job={planningBriefJob} dismissedJobIds={dismissedJobIds} onDismiss={dismissJob} />
       <div className="tabs">
         <button className={tab === "matrix" ? "active" : ""} onClick={() => setTab("matrix")}>内容矩阵</button>
         <button className={tab === "breakthrough" ? "active" : ""} onClick={() => setTab("breakthrough")}>逐词击破</button>
+        <button className={tab === "custom" ? "active" : ""} onClick={() => setTab("custom")}>自定义文章</button>
       </div>
       {tab === "matrix" && (
         <BreakthroughKeywordSelection
@@ -895,7 +951,7 @@ function PlanningView(props: {
         <div className={`keyword-confirmation-summary ${hasConfirmedBreakthroughKeywords ? "confirmed" : "missing"}`}>
           <div>
             <strong>{hasConfirmedBreakthroughKeywords ? `已确认 ${confirmedKeywordList.length} 个逐词击破关键词` : "尚未确认逐词击破关键词"}</strong>
-            <span>{hasConfirmedBreakthroughKeywords ? confirmedKeywordList.join("、") : "请先回内容矩阵 Tab 勾选关键词并确认。"}</span>
+            <span>{hasConfirmedBreakthroughKeywords ? confirmedKeywordList.join("、") : "仅生成逐词击破时需要先回内容矩阵 Tab 勾选关键词；矩阵规划可直接生成 Brief。"}</span>
           </div>
           {!hasConfirmedBreakthroughKeywords && <button className="btn" onClick={() => setTab("matrix")}>去确认关键词</button>}
         </div>
@@ -903,37 +959,46 @@ function PlanningView(props: {
       <div className="bulk-bar selection-bar">
         <div>
           <strong>已选 {selectedCount} 篇规划</strong>
-          <span>{selectedCount ? `其中 ${pendingBriefSources.length} 篇尚未生成 Brief。` : "先勾选内容矩阵或逐词击破里的文章规划。"}</span>
+          <span>{selectedCount ? `其中 ${pendingBriefSources.length} 篇尚未生成 Brief。` : "先勾选内容矩阵、逐词击破或自定义文章里的规划。"}</span>
         </div>
         <div className="actions">
           <button className="btn" disabled={!selectedCount} onClick={() => setSelectedPlans(new Set())}>清空选择</button>
           <button className="btn primary" disabled={!pendingBriefSources.length} onClick={() => void generateSelectedBriefs()}>{generationButtonText}</button>
         </div>
       </div>
-      <JobProgress job={latestJob(project, "brief")} />
-      <CustomPlanningPanel
-        items={data.customPlans}
-        selectedPlans={selectedPlans}
-        briefBySource={briefBySource}
-        onAdd={() => setCustomModal({ mode: "create" })}
-        onEdit={(item) => setCustomModal({ mode: "edit", item })}
-        onDelete={(item) => setDeleteCustomItem(item)}
-        onSelectionChange={setGroupSelection}
-        onToggle={(item) => setSelectedPlans(current => toggleSet(current, item.id))}
-      />
-      {rows.length ? (
+      {tab === "custom" ? (
+        <CustomPlanningPanel
+          items={data.customPlans}
+          selectedPlans={selectedPlans}
+          briefBySource={briefBySource}
+          articleByBriefId={articleByBriefId}
+          onAdd={() => setCustomModal({ mode: "create" })}
+          onEdit={(item) => setCustomModal({ mode: "edit", item })}
+          onDelete={(item) => setDeleteCustomItem(item)}
+          onSelectionChange={setGroupSelection}
+          onToggle={(item) => setSelectedPlans(current => toggleSet(current, item.id))}
+        />
+      ) : rows.length ? (
         <div className="keyword-groups">
-          {Object.entries(groupBy(rows, "keyword")).map(([keyword, groupedRows]) => {
-            const groupKey = `${backendStep}:${keyword}`;
+          {Object.entries(groupedRows).map(([groupName, groupRows]) => {
+            const groupKey = `${activeBackendStep}:${groupName}`;
             const expanded = expandedPlanGroups.has(groupKey);
+            const intentMeta = tab === "matrix" ? matrixGroupMeta.get(groupName) : undefined;
+            const groupTitle = `${groupName}（${planGroupStatsText(groupRows, selectedPlans, briefBySource)}）`;
+            const groupSubtitle = intentMeta
+              ? matrixIntentSubtitle(intentMeta)
+              : tab === "matrix"
+                ? matrixFallbackGroupSubtitle(groupRows)
+                : "";
             return (
               <Panel
-                key={keyword}
-                title={keyword}
+                key={groupName}
+                title={groupTitle}
+                subtitle={groupSubtitle}
                 icon={<Search size={16} />}
                 aside={
                   <PlanGroupAside
-                    rows={groupedRows}
+                    rows={groupRows}
                     selectedPlans={selectedPlans}
                     expanded={expanded}
                     onSelectionChange={setGroupSelection}
@@ -943,33 +1008,26 @@ function PlanningView(props: {
               >
                 {expanded ? (
                   <div className="plan-list">
-                    {groupedRows.map(item => (
+                    {groupRows.map(item => (
                       <PlanRow
                         key={item.id}
                         item={item}
                         selected={selectedPlans.has(item.id)}
-                        briefStatus={briefBySource.get(item.sourceId)?.status}
+                        brief={briefBySource.get(item.sourceId)}
+                        article={articleForPlanItem(item, briefBySource, articleByBriefId)}
                         onToggle={() => setSelectedPlans(current => toggleSet(current, item.id))}
                         onOpen={() => openDetail(item.sourceStep === "breakthrough" ? "breakthrough" : "matrix", item)}
                         onCopy={() => setCustomModal({ mode: "copy", item })}
                       />
                     ))}
                   </div>
-                ) : (
-                  <PlanGroupSummary
-                    keyword={keyword}
-                    rows={groupedRows}
-                    selectedPlans={selectedPlans}
-                    briefBySource={briefBySource}
-                    onExpand={() => togglePlanGroup(groupKey)}
-                  />
-                )}
+                ) : null}
               </Panel>
             );
           })}
         </div>
       ) : (
-        <Panel title={isRunning ? "正在生成规划" : isBlocked ? "需要确认关键词" : stepState.status === "failed" ? "规划生成失败" : "暂无规划结果"} icon={isRunning ? <Loader2 className="spin" size={16} /> : isBlocked ? <CircleAlert size={16} /> : <Route size={16} />}>
+        <Panel title={isRunning ? "正在生成规划" : isBlocked ? "需要确认关键词" : stepState?.status === "failed" ? "规划生成失败" : "暂无规划结果"} icon={isRunning ? <Loader2 className="spin" size={16} /> : isBlocked ? <CircleAlert size={16} /> : <Route size={16} />}>
           <EmptyPanelText text={emptyText} />
         </Panel>
       )}
@@ -1038,6 +1096,7 @@ function CustomPlanningPanel({
   items,
   selectedPlans,
   briefBySource,
+  articleByBriefId,
   onAdd,
   onEdit,
   onDelete,
@@ -1047,6 +1106,7 @@ function CustomPlanningPanel({
   items: ContentItem[];
   selectedPlans: Set<string>;
   briefBySource: Map<string, ContentItem>;
+  articleByBriefId: Map<string, ContentItem>;
   onAdd: () => void;
   onEdit: (item: ContentItem) => void;
   onDelete: (item: ContentItem) => void;
@@ -1067,17 +1127,18 @@ function CustomPlanningPanel({
       {items.length ? (
         <div className="plan-list">
           {items.map(item => {
-            const briefStatus = briefBySource.get(item.sourceId)?.status;
+            const brief = briefBySource.get(item.sourceId);
             return (
               <PlanRow
                 key={item.id}
                 item={item}
                 selected={selectedPlans.has(item.id)}
-                briefStatus={briefStatus}
+                brief={brief}
+                article={articleForPlanItem(item, briefBySource, articleByBriefId)}
                 onToggle={() => onToggle(item)}
                 onEdit={() => onEdit(item)}
                 onDelete={() => onDelete(item)}
-                editDisabled={Boolean(briefStatus)}
+                editDisabled={Boolean(brief?.status)}
               />
             );
           })}
@@ -1146,22 +1207,34 @@ function BriefView(props: {
   setCurrent: (view: AppView) => void;
   openDetail: (item: ContentItem) => void;
   regenerateBrief: (item: ContentItem) => Promise<void>;
+  dismissedJobIds: Set<string>;
+  dismissJob: (jobId: string) => void;
 }) {
-  const { project, items, articles, selectedSourceItems, selectedBriefItems, selectedBriefs, setSelectedBriefs, runBackendStep, confirmBackendStep, setCurrent, openDetail, regenerateBrief } = props;
+  const { project, items, articles, selectedSourceItems, selectedBriefs, setSelectedBriefs, runBackendStep, confirmBackendStep, setCurrent, openDetail, regenerateBrief, dismissedJobIds, dismissJob } = props;
   const articleByBriefId = new Map(articles.map(item => [item.briefId || item.id, item]));
-  const allBriefsSelected = items.length > 0 && items.every(item => selectedBriefs.has(item.id));
-  const pendingArticleBriefs = selectedBriefItems.filter(brief => !articles.some(article => articleCurrentForBrief(article, brief)));
+  const [draftFilters, setDraftFilters] = useState<BriefFilterState>(emptyBriefFilters);
+  const [activeFilters, setActiveFilters] = useState<BriefFilterState>(emptyBriefFilters);
+  const keywordOptions = uniqueStrings(items.map(item => item.keyword).filter(Boolean));
+  const articleTypeOptions = uniqueStrings(items.map(item => item.type).filter(Boolean));
+  const filteredItems = filterBriefItems(items, articleByBriefId, activeFilters);
+  const selectedVisibleBriefItems = filteredItems.filter(item => selectedBriefs.has(item.id));
+  const allBriefsSelected = filteredItems.length > 0 && filteredItems.every(item => selectedBriefs.has(item.id));
+  const pendingArticleBriefs = selectedVisibleBriefItems.filter(brief => !articles.some(article => articleCurrentForBrief(article, brief)));
   const pendingUpdateCount = pendingArticleBriefs.filter(brief => {
     const article = articleByBriefId.get(brief.id);
     return article && !articleCurrentForBrief(article, brief);
   }).length;
-  const articleButtonText = selectedBriefItems.length === 0
+  const articleButtonText = selectedVisibleBriefItems.length === 0
     ? "生成选中正文"
     : pendingArticleBriefs.length === 0
       ? "选中 Brief 均已有正文"
       : pendingUpdateCount
         ? `生成更新后的正文（${pendingArticleBriefs.length} 篇）`
         : `生成选中正文（${pendingArticleBriefs.length} 篇）`;
+  useEffect(() => {
+    setDraftFilters(emptyBriefFilters);
+    setActiveFilters(emptyBriefFilters);
+  }, [project.id]);
   async function generateSelectedArticles() {
     if (!pendingArticleBriefs.length) return;
     if (project.steps.brief.status !== "confirmed") {
@@ -1171,37 +1244,92 @@ function BriefView(props: {
     setCurrent("article");
   }
   function toggleAllBriefs() {
-    setSelectedBriefs(allBriefsSelected ? new Set() : new Set(items.map(item => item.id)));
+    setSelectedBriefs(current => {
+      const visibleIds = new Set(filteredItems.map(item => item.id));
+      if (allBriefsSelected) return new Set([...current].filter(id => !visibleIds.has(id)));
+      return new Set([...current, ...visibleIds]);
+    });
+  }
+  function applyFilters() {
+    const nextFilters = { ...draftFilters };
+    const nextItems = filterBriefItems(items, articleByBriefId, nextFilters);
+    const nextVisibleIds = new Set(nextItems.map(item => item.id));
+    setActiveFilters(nextFilters);
+    setSelectedBriefs(current => new Set([...current].filter(id => nextVisibleIds.has(id))));
+  }
+  function resetFilters() {
+    setDraftFilters(emptyBriefFilters);
+    setActiveFilters(emptyBriefFilters);
   }
   return (
-    <div className="drawer-layout">
+    <div className="section-stack">
       <Panel title="Brief 分组审核" icon={<BadgeAlert size={16} />} aside={<Chip text={`已生成 ${items.length} 篇 Brief`} type={items.length ? "brand" : "warn"} />}>
+        <div className="brief-filter-panel">
+          <div className="brief-filter-grid">
+            <label className="field-block">
+              <span>关键词</span>
+              <select value={draftFilters.keyword} onChange={event => setDraftFilters(current => ({ ...current, keyword: event.target.value }))}>
+                <option value="all">全部</option>
+                {keywordOptions.map(keyword => <option key={keyword} value={keyword}>{keyword}</option>)}
+              </select>
+            </label>
+            <label className="field-block">
+              <span>文章类型</span>
+              <select value={draftFilters.articleType} onChange={event => setDraftFilters(current => ({ ...current, articleType: event.target.value }))}>
+                <option value="all">全部</option>
+                {articleTypeOptions.map(type => <option key={type} value={type}>{type}</option>)}
+              </select>
+            </label>
+            <label className="field-block">
+              <span>Brief 是否修改</span>
+              <select value={draftFilters.briefModified} onChange={event => setDraftFilters(current => ({ ...current, briefModified: event.target.value as BriefModifiedFilter }))}>
+                <option value="all">全部</option>
+                <option value="modified">已修改</option>
+                <option value="unmodified">未修改</option>
+              </select>
+            </label>
+            <label className="field-block">
+              <span>是否生成正文</span>
+              <select value={draftFilters.articleStatus} onChange={event => setDraftFilters(current => ({ ...current, articleStatus: event.target.value as BriefArticleFilter }))}>
+                <option value="all">全部</option>
+                <option value="generated">已生成正文</option>
+                <option value="not_generated">未生成正文</option>
+                <option value="needs_update">正文需更新</option>
+              </select>
+            </label>
+          </div>
+          <div className="actions brief-filter-actions">
+            <button className="btn primary" disabled={!items.length} onClick={applyFilters}><Search size={15} />确认筛选</button>
+            <button className="btn" disabled={!items.length} onClick={resetFilters}><RefreshCw size={15} />重置筛选</button>
+          </div>
+        </div>
         <div className="actions block-actions">
-          <button className="btn" disabled={!items.length} onClick={toggleAllBriefs}>{allBriefsSelected ? "取消全选" : "全选 Brief"}</button>
+          <button className="btn" disabled={!filteredItems.length} onClick={toggleAllBriefs}>{allBriefsSelected ? "取消全选" : "全选 Brief"}</button>
           <button className="btn primary" disabled={!pendingArticleBriefs.length} onClick={() => void generateSelectedArticles()}>{articleButtonText}</button>
-          <button className="btn primary" disabled={project.steps.brief.status !== "completed"} onClick={() => confirmBackendStep("brief")}>确认 Brief</button>
         </div>
         <p className="muted">
-          {selectedBriefItems.length
-            ? `已选 ${selectedBriefItems.length} 篇 Brief，其中 ${pendingArticleBriefs.length} 篇尚未生成正文。`
+          {selectedVisibleBriefItems.length
+            ? `已选 ${selectedVisibleBriefItems.length} 篇 Brief，其中 ${pendingArticleBriefs.length} 篇尚未生成正文。`
+            : filteredItems.length !== items.length
+              ? `当前筛选显示 ${filteredItems.length}/${items.length} 篇 Brief。`
             : selectedSourceItems.length
               ? `规划页当前已选 ${selectedSourceItems.length} 篇文章；请在规划页点击“生成选中 Brief”。`
               : "请先在规划确认页勾选文章并生成 Brief，再在这里选择 Brief 生成正文。"}
         </p>
-        <JobProgress job={latestJob(project, "brief")} />
-        {items.length ? (
+        <JobProgress job={latestJob(project, "brief")} dismissedJobIds={dismissedJobIds} onDismiss={dismissJob} />
+        {filteredItems.length ? (
           <div className="review-list">
-            {items.map(item => (
-              <article className={`review-card ${item.status}`} key={item.id}>
+            {filteredItems.map(item => (
+              <article className={`review-card ${briefReviewCardClass(item, articleByBriefId.get(item.id))}`} key={item.id}>
                 <div className="review-card-head">
                   <input type="checkbox" checked={selectedBriefs.has(item.id)} onChange={() => setSelectedBriefs(current => toggleSet(current, item.id))} />
                   <div>
                     <h3>{item.title}</h3>
-                    <div className="chips">
-                      <Chip text={item.keyword} type="brand" />
-                      <Chip text={item.type} />
-                      <ItemStatusChip status={briefItemStatusLabel(item.status)} />
-                      {articleByBriefId.get(item.id) && <ItemStatusChip status={articleStatusForBrief(articleByBriefId.get(item.id), item)} />}
+                    <div className="chips meta-chips review-meta-chips">
+                      <Chip text={item.keyword} type="brand" className="keyword-chip" />
+                      <Chip text={item.type} className="type-chip" />
+                      <ItemStatusChip status={briefItemStatusLabel(item.status)} className="state-chip" />
+                      {articleStatusForBrief(articleByBriefId.get(item.id), item) && <ItemStatusChip status={articleStatusForBrief(articleByBriefId.get(item.id), item)} className="state-chip" />}
                     </div>
                   </div>
                   <div className="row-actions">
@@ -1216,11 +1344,7 @@ function BriefView(props: {
               </article>
             ))}
           </div>
-        ) : <EmptyPanelText text="暂无 Brief。请先确认规划，再生成 Brief。" />}
-      </Panel>
-      <Panel title="Brief 审核重点" icon={<CircleAlert size={16} />}>
-        <Activity icon={<CheckCircle2 size={16} />} title="来自后台输出" desc="这里不再展示示例 Brief，只展示 Agent 生成结果。" />
-        <Activity icon={<CircleAlert size={16} />} title="确认后再进入正文" desc="后端状态机会阻止跳过确认直接进入下一步。" />
+        ) : <EmptyPanelText text={items.length ? "当前筛选条件下没有 Brief。" : "暂无 Brief。请先确认规划，再生成 Brief。"} />}
       </Panel>
     </div>
   );
@@ -1234,69 +1358,131 @@ function ArticleView(props: {
   setSelectedArticles: React.Dispatch<React.SetStateAction<Set<string>>>;
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
   openDetail: (item: ContentItem) => void;
+  openBriefDetail: (item: ContentItem) => void;
   regenerateArticle: (item: ContentItem) => Promise<void>;
+  dismissedJobIds: Set<string>;
+  dismissJob: (jobId: string) => void;
 }) {
-  const { project, items, briefs, selectedArticles, setSelectedArticles, openDetail, regenerateArticle } = props;
+  const { project, items, briefs, selectedArticles, setSelectedArticles, openDetail, openBriefDetail, regenerateArticle, dismissedJobIds, dismissJob } = props;
   const briefById = new Map(briefs.map(item => [item.id, item]));
-  const selectedArticleItems = items.filter(item => selectedArticles.has(item.id));
-  const allSelected = items.length > 0 && selectedArticleItems.length === items.length;
+  const [draftFilters, setDraftFilters] = useState<BriefFilterState>(emptyBriefFilters);
+  const [activeFilters, setActiveFilters] = useState<BriefFilterState>(emptyBriefFilters);
+  const keywordOptions = uniqueStrings(items.map(item => item.keyword).filter(Boolean));
+  const articleTypeOptions = uniqueStrings(items.map(item => item.type).filter(Boolean));
+  const filteredItems = filterArticleItems(items, briefById, activeFilters);
+  const selectedArticleItems = filteredItems.filter(item => selectedArticles.has(item.id));
+  const allSelected = filteredItems.length > 0 && selectedArticleItems.length === filteredItems.length;
+  useEffect(() => {
+    setDraftFilters(emptyBriefFilters);
+    setActiveFilters(emptyBriefFilters);
+  }, [project.id]);
   function toggleAllArticles() {
-    setSelectedArticles(allSelected ? new Set() : new Set(items.map(item => item.id)));
+    setSelectedArticles(current => {
+      const visibleIds = new Set(filteredItems.map(item => item.id));
+      if (allSelected) return new Set([...current].filter(id => !visibleIds.has(id)));
+      return new Set([...current, ...visibleIds]);
+    });
   }
   function exportSelectedArticles() {
     if (!selectedArticleItems.length) return;
     downloadArticleMarkdown(selectedArticleItems);
   }
+  function applyFilters() {
+    const nextFilters = { ...draftFilters };
+    const nextItems = filterArticleItems(items, briefById, nextFilters);
+    const nextVisibleIds = new Set(nextItems.map(item => item.id));
+    setActiveFilters(nextFilters);
+    setSelectedArticles(current => new Set([...current].filter(id => nextVisibleIds.has(id))));
+  }
+  function resetFilters() {
+    setDraftFilters(emptyBriefFilters);
+    setActiveFilters(emptyBriefFilters);
+  }
   return (
     <div className="section-stack">
+      {items.length > 0 && (
+        <div className="brief-filter-panel">
+          <div className="brief-filter-grid">
+            <label className="field-block">
+              <span>关键词</span>
+              <select value={draftFilters.keyword} onChange={event => setDraftFilters(current => ({ ...current, keyword: event.target.value }))}>
+                <option value="all">全部</option>
+                {keywordOptions.map(keyword => <option key={keyword} value={keyword}>{keyword}</option>)}
+              </select>
+            </label>
+            <label className="field-block">
+              <span>文章类型</span>
+              <select value={draftFilters.articleType} onChange={event => setDraftFilters(current => ({ ...current, articleType: event.target.value }))}>
+                <option value="all">全部</option>
+                {articleTypeOptions.map(type => <option key={type} value={type}>{type}</option>)}
+              </select>
+            </label>
+            <label className="field-block">
+              <span>Brief 是否修改</span>
+              <select value={draftFilters.briefModified} onChange={event => setDraftFilters(current => ({ ...current, briefModified: event.target.value as BriefModifiedFilter }))}>
+                <option value="all">全部</option>
+                <option value="modified">已修改</option>
+                <option value="unmodified">未修改</option>
+              </select>
+            </label>
+            <label className="field-block">
+              <span>正文是否生成/更新</span>
+              <select value={draftFilters.articleStatus} onChange={event => setDraftFilters(current => ({ ...current, articleStatus: event.target.value as BriefArticleFilter }))}>
+                <option value="all">全部</option>
+                <option value="generated">已生成/已更新</option>
+                <option value="needs_update">需更新/基于旧 Brief</option>
+                <option value="failed">生成失败</option>
+              </select>
+            </label>
+          </div>
+          <div className="actions brief-filter-actions">
+            <button className="btn primary" onClick={applyFilters}><Search size={15} />确认筛选</button>
+            <button className="btn" onClick={resetFilters}><RefreshCw size={15} />重置筛选</button>
+          </div>
+        </div>
+      )}
       <div className="bulk-bar">
-        <div><strong>正文折叠审核</strong><span>{items.length ? `已生成 ${items.length} 篇正文，已选 ${selectedArticleItems.length} 篇。` : "暂无正文结果。"}</span></div>
+        <div><strong>正文折叠审核</strong><span>{items.length ? `已生成 ${items.length} 篇正文，当前显示 ${filteredItems.length} 篇，已选 ${selectedArticleItems.length} 篇。` : "暂无正文结果。"}</span></div>
         <div className="actions">
           <button className="btn" disabled>请在 Brief 页选择生成</button>
-          <button className="btn" disabled={!items.length} onClick={toggleAllArticles}>{allSelected ? "取消全选" : "全选正文"}</button>
+          <button className="btn" disabled={!filteredItems.length} onClick={toggleAllArticles}>{allSelected ? "取消全选" : "全选正文"}</button>
           <button className="btn primary" disabled={!selectedArticleItems.length} onClick={exportSelectedArticles}><Download size={15} />导出正文</button>
         </div>
       </div>
-      <JobProgress job={latestJob(project, "article")} />
-      {items.length ? (
+      <JobProgress job={latestJob(project, "article")} dismissedJobIds={dismissedJobIds} onDismiss={dismissJob} />
+      {filteredItems.length ? (
         <div className="article-list">
-          {items.map(item => (
-            <details className={`article-collapse ${item.status}`} key={item.id} open>
-              <summary>
+          {filteredItems.map(item => (
+            <article className={`article-collapse ${articleReviewCardClass(item)}`} key={item.id}>
+              <div className="article-card-head">
                 <input type="checkbox" checked={selectedArticles.has(item.id)} onChange={event => {
-                  event.preventDefault();
                   setSelectedArticles(current => toggleSet(current, item.id));
                 }} />
                 <div>
                   <h3>{item.title}</h3>
-                  <div className="chips">
-                    <Chip text={item.keyword} type="brand" />
-                    <Chip text={item.type} />
-                    <ItemStatusChip status={item.status} />
-                    {briefById.get(item.briefId || "") && <Chip text="已绑定 Brief" type="good" />}
+                  <div className="chips meta-chips review-meta-chips">
+                    <Chip text={item.keyword} type="brand" className="keyword-chip" />
+                    <Chip text={item.type} className="type-chip" />
+                    {briefById.get(item.briefId || "") && (
+                      <button type="button" className="chip good state-chip chip-button" onClick={() => openBriefDetail(briefById.get(item.briefId || "")!)}>
+                        <span>已绑定 Brief</span>
+                      </button>
+                    )}
+                    <ItemStatusChip status={item.status} className="state-chip" />
                   </div>
                 </div>
                 <div className="row-actions">
-                  <button className="btn" onClick={event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    openDetail(item);
-                  }}><BookOpen size={15} />查阅/编辑</button>
-                  <button className="btn" disabled={item.status === "running"} onClick={event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    void regenerateArticle(item);
-                  }}><RefreshCw size={15} />{item.status === "failed" ? "重试" : "重新生成"}</button>
+                  <button className="btn" onClick={() => openDetail(item)}><BookOpen size={15} />查阅/编辑</button>
+                  <button className="btn" disabled={item.status === "running"} onClick={() => void regenerateArticle(item)}><RefreshCw size={15} />{item.status === "failed" ? "重试" : "重新生成"}</button>
                 </div>
-              </summary>
+              </div>
               {(item.error || item.staleReason) && <p className={item.staleReason ? "item-warning" : "item-error"}>{item.error || item.staleReason}</p>}
-              <pre className="preview">{item.markdown || JSON.stringify(item.raw, null, 2)}</pre>
-            </details>
+            </article>
           ))}
         </div>
       ) : (
         <Panel title="暂无正文" icon={<Newspaper size={16} />}>
-          <EmptyPanelText text="请先确认 Brief，然后点击“生成正文”。" />
+          <EmptyPanelText text={items.length ? "当前筛选条件下没有正文。" : "请先确认 Brief，然后点击“生成正文”。"} />
         </Panel>
       )}
     </div>
@@ -1327,7 +1513,14 @@ function RewriteView({ project, items, group, setGroup, runBackendStep, confirmB
           <article className="review-card" key={item.id}>
             <div className="review-card-head">
               <RefreshCw size={16} />
-              <div><h3>{item.title}</h3><div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.status} /><Chip text={item.used} /></div></div>
+              <div>
+                <h3>{item.title}</h3>
+                <div className="chips meta-chips review-meta-chips">
+                  <Chip text={item.keyword} type="brand" className="keyword-chip" />
+                  <ItemStatusChip status={item.status} className="state-chip" />
+                  <Chip text={item.used} className="state-chip" />
+                </div>
+              </div>
               <button className="btn">确认</button>
             </div>
             <p>{item.markdown || item.role}</p>
@@ -1359,7 +1552,15 @@ function LibraryView({ project, data, group, setGroup, outputs, logs, openDetail
         <div className="article-list">
           {allItems.length ? allItems.map(item => (
             <article className="library-item" key={item.id}>
-              <div><h3>{item.title}</h3><p>{item.markdown || item.role}</p><div className="chips"><Chip text={item.keyword} type="brand" /><Chip text={item.type} /><Chip text={item.status} /></div></div>
+              <div>
+                <h3>{item.title}</h3>
+                <p>{item.markdown || item.role}</p>
+                <div className="chips meta-chips review-meta-chips">
+                  <Chip text={item.keyword} type="brand" className="keyword-chip" />
+                  <Chip text={item.type} className="type-chip" />
+                  <ItemStatusChip status={item.status} className="state-chip" />
+                </div>
+              </div>
               <button className="btn" onClick={() => openDetail(data.articles.some(article => article.id === item.id) ? "article" : "rewrite", item)}><BookOpen size={15} />查阅</button>
             </article>
           )) : <EmptyPanelText text="暂无文章。生成正文或改写稿后会显示在这里。" />}
@@ -1398,33 +1599,10 @@ function PlanGroupAside({
   );
 }
 
-function PlanGroupSummary({
-  keyword,
-  rows,
-  selectedPlans,
-  briefBySource,
-  onExpand
-}: {
-  keyword: string;
-  rows: ContentItem[];
-  selectedPlans: Set<string>;
-  briefBySource: Map<string, ContentItem>;
-  onExpand: () => void;
-}) {
+function planGroupStatsText(rows: ContentItem[], selectedPlans: Set<string>, briefBySource: Map<string, ContentItem>): string {
   const selectedCount = rows.filter(item => selectedPlans.has(item.id)).length;
-  const briefCount = rows.filter(item => briefBySource.has(item.sourceId)).length;
-  const typePreview = uniqueStrings(rows.map(item => item.type)).slice(0, 4).join("、");
-  const titlePreview = rows.slice(0, 2).map(item => item.title).join(" / ");
-  return (
-    <button className="plan-group-summary" onClick={onExpand}>
-      <div>
-        <strong>{keyword}</strong>
-        <span>{rows.length} 条规划，已选 {selectedCount} 条，已生成 Brief {briefCount} 条。</span>
-        <p>{typePreview || "待识别类型"}{titlePreview ? `｜${clampText(titlePreview, 84)}` : ""}</p>
-      </div>
-      <span className="summary-cta">展开规划</span>
-    </button>
-  );
+  const briefCount = rows.filter(item => briefIsGenerated(briefBySource.get(item.sourceId))).length;
+  return `${rows.length} 条规划，已选 ${selectedCount} 条，已生成 Brief ${briefCount} 条`;
 }
 
 function GroupSelectAside({
@@ -1451,7 +1629,8 @@ function GroupSelectAside({
 function PlanRow({
   item,
   selected,
-  briefStatus,
+  brief,
+  article,
   onToggle,
   onOpen,
   onCopy,
@@ -1461,7 +1640,8 @@ function PlanRow({
 }: {
   item: ContentItem;
   selected: boolean;
-  briefStatus?: string;
+  brief?: ContentItem;
+  article?: ContentItem;
   onToggle: () => void;
   onOpen?: () => void;
   onCopy?: () => void;
@@ -1470,17 +1650,15 @@ function PlanRow({
   editDisabled?: boolean;
 }) {
   return (
-    <article className={`plan-row ${selected ? "selected" : ""}`}>
+    <article className={`plan-row ${planReviewCardClass(brief, article)} ${selected ? "selected" : ""}`}>
       <input type="checkbox" checked={selected} onChange={onToggle} />
       <div>
         <h3>{item.type}｜{item.title}</h3>
         <p>{item.role}</p>
-        <div className="chips">
-          <Chip text={item.keyword} type="brand" />
-          <Chip text={item.channel} />
-          <ItemStatusChip status={item.status} />
-          {briefStatus && <ItemStatusChip status={`Brief${statusLabel(briefStatus)}`} />}
-          <Chip text={item.used} />
+        <div className="chips meta-chips plan-meta-chips">
+          <Chip text={item.keyword} type="brand" className="keyword-chip" />
+          <Chip text={item.channel} className="channel-chip" />
+          <PlanBriefStatusChip status={brief?.status} />
         </div>
       </div>
       <div className="row-actions">
@@ -1493,11 +1671,18 @@ function PlanRow({
   );
 }
 
-function Panel({ title, icon, children, aside }: { title: string; icon: React.ReactNode; children: React.ReactNode; aside?: React.ReactNode }) {
+function Panel({ title, icon, children, aside, subtitle }: { title: string; icon: React.ReactNode; children: React.ReactNode; aside?: React.ReactNode; subtitle?: string }) {
+  const hasBody = children !== null && children !== undefined && children !== false;
   return (
     <section className="panel">
-      <div className="panel-head"><div className="panel-title">{icon}{title}</div>{aside}</div>
-      <div className="panel-body">{children}</div>
+      <div className="panel-head">
+        <div className="panel-title-wrap">
+          <div className="panel-title">{icon}<span>{title}</span></div>
+          {subtitle && <p>{subtitle}</p>}
+        </div>
+        {aside}
+      </div>
+      {hasBody && <div className="panel-body">{children}</div>}
     </section>
   );
 }
@@ -1510,8 +1695,27 @@ function Stat({ value, label }: { value: number; label: string }) {
   return <div className="stat"><strong>{value}</strong><span>{label}</span></div>;
 }
 
-function Chip({ text, type = "" }: { text: string | number; type?: string }) {
-  return <span className={`chip ${type}`}>{text}</span>;
+function Chip({ text, type = "", className = "" }: { text: string | number; type?: string; className?: string }) {
+  const label = String(text);
+  return <span className={`chip ${type} ${className}`.trim()} title={label}><span>{label}</span></span>;
+}
+
+function PlanBriefStatusChip({ status }: { status?: string }) {
+  if (status === "running" || status === "queued") {
+    return <Chip text="Brief 生成中" type="warn" className="state-chip" />;
+  }
+  if (status === "failed" || status === "pending") {
+    return <Chip text="未生成 Brief" type="warn" className="state-chip" />;
+  }
+  if (status) {
+    return <Chip text="已生成 Brief" type="good" className="state-chip" />;
+  }
+  return <Chip text="未生成 Brief" type="warn" className="state-chip" />;
+}
+
+function briefIsGenerated(brief?: ContentItem): boolean {
+  if (!brief) return false;
+  return !["failed", "running", "queued", "pending"].includes(brief.status);
 }
 
 function Status({ status }: { status: string }) {
@@ -1519,25 +1723,36 @@ function Status({ status }: { status: string }) {
   return <Chip text={status} type={type} />;
 }
 
-function ItemStatusChip({ status }: { status: string }) {
+function ItemStatusChip({ status, className = "" }: { status: string; className?: string }) {
   const type = status.includes("失败") || status.includes("failed")
     ? "danger"
-    : status.includes("需更新") || status.includes("旧 Brief") || status.includes("待生成正文") || status.includes("已修改") || status.includes("modified") || status.includes("stale")
+    : status.includes("需更新") || status.includes("旧 Brief") || status.includes("待生成") || status.includes("已修改") || status.includes("modified") || status.includes("stale")
       ? "warn"
       : status.includes("生成中") || status.includes("running")
       ? "warn"
-      : status.includes("完成") || status.includes("已生成") || status.includes("completed") || status.includes("generated")
+      : status.includes("完成") || status.includes("已生成") || status.includes("已更新") || status.includes("completed") || status.includes("generated")
         ? "good"
         : "";
-  return <Chip text={statusLabel(status)} type={type} />;
+  return <Chip text={statusLabel(status)} type={type} className={className} />;
 }
 
-function StepProgressPanel({ project, steps = ["materials", "intake"] }: { project: Project; steps?: WorkflowStep[] }) {
+function StepProgressPanel({
+  project,
+  steps = ["materials", "intake"],
+  dismissedJobIds,
+  dismissJob
+}: {
+  project: Project;
+  steps?: WorkflowStep[];
+  dismissedJobIds: Set<string>;
+  dismissJob: (jobId: string) => void;
+}) {
   const jobs = steps.map(step => latestJob(project, step)).filter((job): job is Project["jobs"][number] => Boolean(job));
   const activeJob = jobs.find(job => job.status === "running" || job.status === "queued");
   const blockedStep = steps.find(step => outputBlockerMessage(project.steps[step].output));
   const failedJob = jobs.find(job => job.status === "failed");
-  const visibleJobs = activeJob ? [activeJob] : failedJob ? [failedJob] : blockedStep ? [] : jobs.filter(job => job.status === "completed");
+  const completedJobs = jobs.filter(job => job.status === "completed" && !dismissedJobIds.has(job.id));
+  const visibleJobs = activeJob ? [activeJob] : failedJob ? [failedJob] : blockedStep ? [] : completedJobs;
   const fallbackFailures = steps.filter(step => step !== blockedStep && (project.steps[step].status === "failed" || outputBlockerMessage(project.steps[step].output)) && !jobs.some(job => job.step === step));
 
   if (!visibleJobs.length && !fallbackFailures.length && !blockedStep) return null;
@@ -1551,7 +1766,7 @@ function StepProgressPanel({ project, steps = ["materials", "intake"] }: { proje
           <span>{blockedStep ? outputBlockerMessage(project.steps[blockedStep].output) : progressSubtitle(activeJob || failedJob || visibleJobs[0])}</span>
         </div>
       </div>
-      {visibleJobs.map(job => <JobProgress job={job} key={job.id} />)}
+      {visibleJobs.map(job => <JobProgress job={job} dismissedJobIds={dismissedJobIds} onDismiss={dismissJob} key={job.id} />)}
       {blockedStep && (
         <div className="job-progress failed">
           <div className="job-progress-head">
@@ -1576,18 +1791,34 @@ function StepProgressPanel({ project, steps = ["materials", "intake"] }: { proje
   );
 }
 
-function JobProgress({ job }: { job?: Project["jobs"][number] }) {
-  if (!job || (!job.total_count && !job.message && job.status === "queued")) return null;
+function JobProgress({
+  job,
+  dismissedJobIds,
+  onDismiss
+}: {
+  job?: Project["jobs"][number];
+  dismissedJobIds: Set<string>;
+  onDismiss: (jobId: string) => void;
+}) {
+  if (!job || (job.status === "completed" && dismissedJobIds.has(job.id)) || (!job.total_count && !job.message && job.status === "queued")) return null;
   const total = Math.max(job.total_count || 0, 1);
   const rawProcessed = (job.completed_count || 0) + (job.failed_count || 0) + (job.skipped_count || 0);
   const processed = job.status === "completed" && rawProcessed === 0 && !job.total_count ? total : Math.min(rawProcessed, total);
   const percent = Math.round((processed / total) * 100);
   const indeterminate = job.status === "running" && total <= 1 && processed === 0;
+  const canDismiss = job.status === "completed";
   return (
     <div className={`job-progress ${job.status}`}>
       <div className="job-progress-head">
         <strong>{job.message || progressSubtitle(job)}</strong>
-        <ItemStatusChip status={job.status} />
+        <div className="job-progress-status">
+          <ItemStatusChip status={job.status} />
+          {canDismiss && (
+            <button type="button" className="icon-btn job-dismiss" aria-label="关闭完成提示" title="关闭完成提示" onClick={() => onDismiss(job.id)}>
+              <X size={14} />
+            </button>
+          )}
+        </div>
       </div>
       <div className={`job-progress-bar ${indeterminate ? "indeterminate" : ""}`}>
         <span style={{ width: indeterminate ? "38%" : `${percent}%` }} />
@@ -1699,6 +1930,7 @@ function EmptyPanelText({ text }: { text: string }) {
 interface DerivedData {
   intakeRows: IntakeRow[];
   matrixPlans: ContentItem[];
+  matrixIntentGroups: MatrixIntentGroup[];
   breakthroughPlans: ContentItem[];
   customPlans: ContentItem[];
   matrixKeywords: string[];
@@ -1711,20 +1943,22 @@ interface DerivedData {
 }
 
 function emptyDerivedData(): DerivedData {
-  return { intakeRows: [], matrixPlans: [], breakthroughPlans: [], customPlans: [], matrixKeywords: [], confirmedBreakthroughKeywords: [], plans: [], briefs: [], articles: [], rewrites: [], archiveCount: 0 };
+  return { intakeRows: [], matrixPlans: [], matrixIntentGroups: [], breakthroughPlans: [], customPlans: [], matrixKeywords: [], confirmedBreakthroughKeywords: [], plans: [], briefs: [], articles: [], rewrites: [], archiveCount: 0 };
 }
 
 function deriveProjectData(project: Project): DerivedData {
   const matrixPlans = normalizeItems(project.steps.matrix.output, "matrix");
+  const matrixIntentGroups = normalizeMatrixIntentGroups(project.steps.matrix.output, matrixPlans);
   const matrixKeywordOptions = extractMatrixKeywordOptions(project.steps.matrix.output);
   const breakthroughPlans = normalizeItems(project.steps.breakthrough.output, "breakthrough");
   const customPlans = normalizeItems({ items: project.custom_sources || [] }, "custom");
-  const briefs = normalizeItems(project.steps.brief.output, "brief");
+  const briefs = sortBriefsNewestFirst(normalizeItems(project.steps.brief.output, "brief"));
   const articles = normalizeItems(project.steps.article.output, "article");
   const rewrites = normalizeItems(project.steps.rewrite.output, "rewrite");
   return {
     intakeRows: normalizeIntake(project.steps.intake.output),
     matrixPlans,
+    matrixIntentGroups,
     breakthroughPlans,
     customPlans,
     matrixKeywords: matrixKeywordOptions.length ? matrixKeywordOptions : uniqueKeywords(matrixPlans),
@@ -1836,6 +2070,139 @@ function normalizeItems(output: AnyRecord, step: string): ContentItem[] {
     };
     return applyItemOverride(item, overrides);
   });
+}
+
+function sortBriefsNewestFirst(items: ContentItem[]): ContentItem[] {
+  return items
+    .map((item, index) => ({ item, index, generatedAt: itemGeneratedAtMs(item) }))
+    .sort((left, right) => right.generatedAt - left.generatedAt || right.index - left.index)
+    .map(entry => entry.item);
+}
+
+function itemGeneratedAtMs(item: ContentItem): number {
+  return timestampMs(readString(item.raw, ["generated_at", "generatedAt", "created_at", "createdAt", "updated_at", "updatedAt"], ""));
+}
+
+function filterBriefItems(
+  items: ContentItem[],
+  articleByBriefId: Map<string, ContentItem>,
+  filters: BriefFilterState
+): ContentItem[] {
+  return items.filter(item => {
+    if (filters.keyword !== "all" && item.keyword !== filters.keyword) return false;
+    if (filters.articleType !== "all" && item.type !== filters.articleType) return false;
+    if (filters.briefModified !== "all") {
+      const modified = briefWasModified(item);
+      if (filters.briefModified === "modified" && !modified) return false;
+      if (filters.briefModified === "unmodified" && modified) return false;
+    }
+    if (filters.articleStatus !== "all" && briefArticleFilterStatus(articleByBriefId.get(item.id), item) !== filters.articleStatus) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function filterArticleItems(
+  items: ContentItem[],
+  briefById: Map<string, ContentItem>,
+  filters: BriefFilterState
+): ContentItem[] {
+  return items.filter(item => {
+    const brief = briefById.get(item.briefId || "");
+    if (filters.keyword !== "all" && item.keyword !== filters.keyword) return false;
+    if (filters.articleType !== "all" && item.type !== filters.articleType) return false;
+    if (filters.briefModified !== "all") {
+      const modified = brief ? briefWasModified(brief) : false;
+      if (filters.briefModified === "modified" && !modified) return false;
+      if (filters.briefModified === "unmodified" && modified) return false;
+    }
+    if (filters.articleStatus !== "all" && articleFilterStatus(item, brief) !== filters.articleStatus) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function briefWasModified(brief: ContentItem): boolean {
+  return ["modified", "stale"].includes(brief.status);
+}
+
+function briefArticleFilterStatus(article: ContentItem | undefined, brief: ContentItem): Exclude<BriefArticleFilter, "all"> {
+  if (!article) return "not_generated";
+  return articleCurrentForBrief(article, brief) ? "generated" : "needs_update";
+}
+
+function articleFilterStatus(article: ContentItem, brief?: ContentItem): Exclude<BriefArticleFilter, "all" | "not_generated"> {
+  if (article.status === "failed") return "failed";
+  if (brief && !articleCurrentForBrief(article, brief)) return "needs_update";
+  if (["running", "queued", "pending", "stale", "modified"].includes(article.status)) return "needs_update";
+  return article.markdown || ["completed", "confirmed"].includes(article.status) ? "generated" : "needs_update";
+}
+
+function normalizeMatrixIntentGroups(output: AnyRecord, items: ContentItem[]): MatrixIntentGroup[] {
+  const rows = extractArrayByKeys(output, ["intent_groups", "keyword_intent_groups", "关键词意图分组", "二_关键词意图分组"]);
+  const groups = rows.map((row, index) => {
+    const name = readString(row, ["intent_group", "name", "group", "意图簇", "关键词意图簇"], `意图簇 ${index + 1}`);
+    return {
+      id: stableContentId("intent", name, "", "", index),
+      name,
+      keywords: readStringList(row, ["keywords", "corresponding_keywords", "对应关键词", "关键词"]),
+      userQuestion: readString(row, ["user_real_question", "ai_question", "用户真实问题", "AI需要回答的问题"]),
+      userStage: readString(row, ["user_stage", "用户阶段"]),
+      articleTypes: readStringList(row, ["main_article_types", "article_types", "主攻文章类型", "常见主攻文章类型"]),
+      raw: row
+    };
+  }).filter(group => group.name && group.name !== "未分组");
+  if (groups.length) return groups;
+
+  return Object.entries(groupMatrixRowsByIntent(items, [])).map(([name, groupItems], index) => ({
+    id: stableContentId("intent", name, "", "", index),
+    name,
+    keywords: uniqueKeywords(groupItems),
+    userQuestion: "",
+    userStage: "",
+    articleTypes: uniqueStrings(groupItems.map(item => item.type)),
+    raw: {}
+  }));
+}
+
+function groupMatrixRowsByIntent(rows: ContentItem[], intentGroups: MatrixIntentGroup[]): Record<string, ContentItem[]> {
+  const grouped = rows.reduce<Record<string, ContentItem[]>>((acc, row) => {
+    const rawGroup = readString(row.raw, ["intent_group", "intentGroup", "intent_cluster", "main_intent_group", "意图簇", "关键词意图簇"], "");
+    const groupName = rawGroup || intentGroupForKeyword(row.keyword, intentGroups) || "未识别意图簇";
+    acc[groupName] ||= [];
+    acc[groupName].push(row);
+    return acc;
+  }, {});
+  const ordered: Record<string, ContentItem[]> = {};
+  intentGroups.forEach(group => {
+    if (grouped[group.name]) ordered[group.name] = grouped[group.name];
+  });
+  Object.entries(grouped).forEach(([groupName, groupRows]) => {
+    if (!ordered[groupName]) ordered[groupName] = groupRows;
+  });
+  return ordered;
+}
+
+function intentGroupForKeyword(keyword: string, groups: MatrixIntentGroup[]): string {
+  const normalized = keyword.trim();
+  if (!normalized) return "";
+  return groups.find(group => group.keywords.includes(normalized))?.name || "";
+}
+
+function matrixIntentSubtitle(group: MatrixIntentGroup): string {
+  const parts = [
+    group.userQuestion,
+    group.keywords.length ? `关键词：${group.keywords.join("、")}` : "",
+    group.userStage ? `用户阶段：${group.userStage}` : ""
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function matrixFallbackGroupSubtitle(rows: ContentItem[]): string {
+  const keywords = uniqueKeywords(rows);
+  return keywords.length ? `关键词：${keywords.join("、")}` : "";
 }
 
 function extractMatrixArray(output: AnyRecord): AnyRecord[] {
@@ -2067,6 +2434,19 @@ function readString(row: AnyRecord, keys: string[], fallback = ""): string {
   return fallback;
 }
 
+function readStringList(row: AnyRecord, keys: string[]): string[] {
+  for (const key of keys) {
+    const value = row[key];
+    if (Array.isArray(value)) return uniqueStrings(value.map(formatValue));
+    if (typeof value === "string" && value.trim()) {
+      const parts = value.split(/[、，,;；\n]/).map(item => item.trim());
+      const normalized = uniqueStrings(parts);
+      if (normalized.length) return normalized;
+    }
+  }
+  return [];
+}
+
 function readNumber(row: AnyRecord, keys: string[], fallback = 0): number {
   for (const key of keys) {
     const value = row[key];
@@ -2140,7 +2520,30 @@ function groupBy<T>(rows: T[], key: keyof T): Record<string, T[]> {
 }
 
 function latestJob(project: Project, step: WorkflowStep): Project["jobs"][number] | undefined {
-  return project.jobs.find(job => job.step === step);
+  return project.jobs
+    .filter(job => job.step === step)
+    .sort((left, right) => timestampMs(right.updated_at || right.created_at) - timestampMs(left.updated_at || left.created_at))[0];
+}
+
+function briefProgressForPlanning(project: Project, activeStep: WorkflowStep | null): Project["jobs"][number] | undefined {
+  const briefJob = latestJob(project, "brief");
+  if (!briefJob) return undefined;
+  if (briefJob.status === "queued" || briefJob.status === "running") return briefJob;
+  if (!activeStep) return briefJob;
+
+  const activeJob = latestJob(project, activeStep);
+  const planningUpdatedAt = Math.max(
+    timestampMs(project.steps[activeStep].updated_at),
+    activeJob ? timestampMs(activeJob.updated_at || activeJob.created_at) : 0
+  );
+  const briefUpdatedAt = timestampMs(briefJob.updated_at || briefJob.created_at);
+  return briefUpdatedAt >= planningUpdatedAt ? briefJob : undefined;
+}
+
+function timestampMs(value?: string | null): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function articleCurrentForBrief(article: ContentItem, brief: ContentItem): boolean {
@@ -2150,10 +2553,47 @@ function articleCurrentForBrief(article: ContentItem, brief: ContentItem): boole
 }
 
 function articleStatusForBrief(article: ContentItem | undefined, brief: ContentItem): string {
-  if (!article) return "";
+  if (!article) {
+    return briefIsGenerated(brief) ? "正文待生成" : "";
+  }
+  if (["modified", "stale"].includes(brief.status)) {
+    return articleCurrentForBrief(article, brief) ? "正文已更新" : "正文需更新";
+  }
   if (articleCurrentForBrief(article, brief)) return "正文已生成";
   if (article.status === "stale" || article.briefRevision < brief.revision) return "正文需更新";
   return `正文${statusLabel(article.status)}`;
+}
+
+function briefReviewCardClass(brief: ContentItem, article: ContentItem | undefined): string {
+  if (brief.status === "failed") return "review-danger";
+  if (["running", "queued", "pending"].includes(brief.status)) return "review-running";
+  if (!article) return briefIsGenerated(brief) ? "review-warn" : "";
+  if (article.status === "failed") return "review-danger";
+  if (!articleCurrentForBrief(article, brief)) return "review-warn";
+  return "review-good";
+}
+
+function planReviewCardClass(brief: ContentItem | undefined, _article: ContentItem | undefined): string {
+  if (!brief) return "review-warn";
+  if (brief.status === "failed") return "review-danger";
+  if (["running", "queued", "pending"].includes(brief.status)) return "review-running";
+  if (["modified", "stale"].includes(brief.status)) return "review-warn";
+  return briefIsGenerated(brief) ? "review-good" : "review-warn";
+}
+
+function articleForPlanItem(
+  item: ContentItem,
+  briefBySource: Map<string, ContentItem>,
+  articleByBriefId: Map<string, ContentItem>
+): ContentItem | undefined {
+  const brief = briefBySource.get(item.sourceId);
+  return brief ? articleByBriefId.get(brief.id) : undefined;
+}
+
+function articleReviewCardClass(article: ContentItem): string {
+  if (article.status === "failed") return "review-danger";
+  if (["running", "queued", "pending", "stale", "modified"].includes(article.status)) return "review-warn";
+  return article.markdown || ["completed", "confirmed"].includes(article.status) ? "review-good" : "";
 }
 
 function briefItemStatusLabel(status: string): string {
@@ -2163,7 +2603,7 @@ function briefItemStatusLabel(status: string): string {
     running: "Brief生成中",
     completed: "Brief已生成",
     confirmed: "Brief已确认",
-    modified: "Brief已修改，待生成正文",
+    modified: "Brief已修改",
     stale: "Brief需更新",
     failed: "Brief失败"
   };

@@ -76,6 +76,8 @@ INTAKE_OUTPUT_TEMPLATE = {
 
 PLANNING_SCHEMA_VERSION = "1.0"
 PLANNING_STEPS = {"matrix", "breakthrough"}
+MATERIAL_CONTEXT_LIMIT = 50000
+PRIOR_OUTPUT_CONTEXT_LIMIT = 50000
 BREAKTHROUGH_ARTICLE_TYPES = [
     "支柱标准文",
     "榜单推荐文",
@@ -84,21 +86,71 @@ BREAKTHROUGH_ARTICLE_TYPES = [
     "产品证据文",
     "FAQ问答文",
 ]
+MATRIX_REQUIRED_ARTICLE_TYPES = BREAKTHROUGH_ARTICLE_TYPES
+MATRIX_OPTIONAL_ARTICLE_TYPES = [
+    "品牌认知文",
+    "行业趋势文",
+    "服务方案解析文",
+    "用户案例文",
+    "实测体验文",
+    "风险避坑文",
+    "标准/认证解读文",
+    "价格预算决策文",
+    "组合方案文",
+]
 BREAKTHROUGH_TYPE_ALIASES = {
     "支柱标准文章": "支柱标准文",
     "支柱标准": "支柱标准文",
+    "支柱文": "支柱标准文",
+    "标准文": "支柱标准文",
     "榜单推荐文章": "榜单推荐文",
     "榜单推荐": "榜单推荐文",
+    "榜单文": "榜单推荐文",
+    "推荐榜单文": "榜单推荐文",
     "横评对比文章": "横评对比文",
     "横评对比": "横评对比文",
+    "横评文": "横评对比文",
+    "对比文": "横评对比文",
+    "对比评测文": "横评对比文",
     "场景选购文章": "场景选购文",
     "场景选购": "场景选购文",
+    "场景文": "场景选购文",
+    "选购文": "场景选购文",
+    "场景指南文": "场景选购文",
     "产品证据文章": "产品证据文",
     "产品证据": "产品证据文",
+    "证据文": "产品证据文",
+    "产品解析文": "产品证据文",
     "FAQ问答短文": "FAQ问答文",
     "FAQ问答文章": "FAQ问答文",
     "FAQ问答": "FAQ问答文",
+    "FAQ文": "FAQ问答文",
+    "问答文": "FAQ问答文",
     "faq": "FAQ问答文",
+}
+MATRIX_TYPE_ALIASES = {
+    **BREAKTHROUGH_TYPE_ALIASES,
+    "品牌认知文章": "品牌认知文",
+    "品牌认知": "品牌认知文",
+    "行业趋势文章": "行业趋势文",
+    "行业趋势/白皮书解读文": "行业趋势文",
+    "白皮书解读文": "行业趋势文",
+    "服务方案解析文章": "服务方案解析文",
+    "服务方案解析": "服务方案解析文",
+    "案例证据文": "用户案例文",
+    "用户案例/实测体验文": "用户案例文",
+    "用户案例文章": "用户案例文",
+    "实测体验文章": "实测体验文",
+    "风险避坑文章": "风险避坑文",
+    "风险避坑/误区纠正文": "风险避坑文",
+    "误区纠正文": "风险避坑文",
+    "标准认证解读文": "标准/认证解读文",
+    "标准/合规解读文": "标准/认证解读文",
+    "认证解读文": "标准/认证解读文",
+    "价格预算文": "价格预算决策文",
+    "价格预算决策文章": "价格预算决策文",
+    "组合方案/套系搭配文": "组合方案文",
+    "套系搭配文": "组合方案文",
 }
 PLANNING_ITEM_KEYS = [
     "source_id",
@@ -111,9 +163,16 @@ PLANNING_ITEM_KEYS = [
     "role",
     "core_recommendation",
     "required_evidence",
+    "recommendation_strength",
+    "supporting_articles",
+    "evidence_chain",
+    "evidence_gaps",
     "competitor_boundary",
     "channels",
     "brief_focus",
+    "outline_requirements",
+    "forbidden_expressions",
+    "suggested_word_count",
     "priority",
     "status",
 ]
@@ -131,12 +190,37 @@ MATRIX_OUTPUT_TEMPLATE = {
         "recommendation_logic": "",
         "expression_boundaries": [],
     },
+    "keyword_overview": {
+        "common_goal": "",
+        "core_user_intents": [],
+        "user_decision_stage": "",
+        "target_recommendation_cognition": "",
+        "required_article_sections": MATRIX_REQUIRED_ARTICLE_TYPES,
+        "optional_article_sections": [],
+        "article_type_count_limit": 10,
+    },
     "intent_groups": [],
+    "article_type_pool": [
+        {
+            "type": article_type,
+            "usage": "必选",
+            "reason": "",
+            "covered_keywords_or_intent_groups": [],
+            "recommendation_strength": "",
+        }
+        for article_type in MATRIX_REQUIRED_ARTICLE_TYPES
+    ],
+    "answer_logic": [],
+    "keyword_planning": [],
     "items": [],
+    "shared_supporting_articles": [],
+    "unified_recommendation_language": [],
     "evidence_gaps": [],
     "publishing_plan": [],
     "schedule": [],
+    "priority_plan": [],
     "brief_requirements": [],
+    "final_execution_advice": "",
     "warnings": [],
 }
 BREAKTHROUGH_OUTPUT_TEMPLATE = {
@@ -315,7 +399,8 @@ class AgentWorkflow:
             if not keywords:
                 raise WorkflowError("请先在内容矩阵中确认进入逐词击破的关键词。")
             payload["confirmed_keywords"] = keywords
-        self._assert_previous_confirmed(project_id, step)
+        if step != "brief":
+            self._assert_previous_confirmed(project_id, step)
         project = self.repository.load_project(project_id)
         if project.steps[step].status == "running":
             raise WorkflowError(f"{STEP_LABELS.get(step, step)}正在运行，请等待完成或点击刷新状态。")
@@ -325,6 +410,7 @@ class AgentWorkflow:
         if step == "brief":
             original_sources = selected_list(payload, "selected_sources", fallback="selected_articles")
             payload["selected_sources"] = select_missing_sources(project.steps["brief"].output, payload)
+            self._assert_brief_sources_ready(project, payload["selected_sources"])
             total_count = len(payload["selected_sources"])
             skipped_count = max(len(original_sources) - total_count, 0)
             payload["skipped_count"] = skipped_count
@@ -611,11 +697,7 @@ class AgentWorkflow:
         rules = self.skill_loader.load_for_step(step)
         project = self.repository.load_project(project_id)
         material_summary = project.steps["materials"].output.get("summary", "")
-        prior_outputs = {
-            key: value.output
-            for key, value in project.steps.items()
-            if key in STEP_ORDER and key != step and value.output
-        }
+        prior_outputs = prior_outputs_for_step(project, step)
         selection_blocks = build_selection_prompt_blocks(step, payload)
         system = (
             "你是一个本地 GEO 撰文后台 Agent。必须严格遵守 skill 规则，"
@@ -624,8 +706,8 @@ class AgentWorkflow:
         user_parts = [
             f"# 当前步骤\n{STEP_LABELS.get(step, step)}",
             "# Skill 规则\n" + rules,
-            "# 项目资料\n" + material_summary[:50000],
-            "# 已有上游输出\n" + json.dumps(prior_outputs, ensure_ascii=False, indent=2)[:50000],
+            "# 项目资料\n" + material_summary[:MATERIAL_CONTEXT_LIMIT],
+            "# 已有上游输出\n" + json.dumps(prior_outputs, ensure_ascii=False, indent=2)[:PRIOR_OUTPUT_CONTEXT_LIMIT],
         ]
         user_parts.extend(selection_blocks)
         if planning_requirements := planning_output_requirements(step, payload):
@@ -661,6 +743,25 @@ class AgentWorkflow:
         if previous_state.status != "confirmed":
             raise WorkflowError(f"请先确认上一步：{previous}")
 
+    def _assert_brief_sources_ready(self, project: Any, selected_sources: list[dict[str, Any]]) -> None:
+        required_steps: set[WorkflowStep] = set()
+        for source in selected_sources:
+            source_step = str(source.get("source_step") or "matrix").strip().lower()
+            if source_step in {"matrix", "source", "planning"}:
+                required_steps.add("matrix")
+            elif source_step == "custom":
+                required_steps.add("matrix")
+            elif source_step == "breakthrough":
+                required_steps.add("breakthrough")
+            else:
+                raise WorkflowError(f"暂不支持的 Brief 来源：{source_step}")
+
+        ready_statuses = {"completed", "confirmed"}
+        if "matrix" in required_steps and project.steps["matrix"].status not in ready_statuses:
+            raise WorkflowError("请先生成内容矩阵，再为内容矩阵规划生成 Brief。")
+        if "breakthrough" in required_steps and project.steps["breakthrough"].status not in ready_statuses:
+            raise WorkflowError("请先完成逐词击破，再为逐词击破规划生成 Brief。内容矩阵规划可直接生成 Brief。")
+
 
 def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) -> str:
     if step == "intake":
@@ -677,10 +778,19 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
         return (
             "# 固定输出模板\n"
             "你必须严格使用下面 JSON 模板的英文 key。不要把字段名翻译成中文，不要输出 plans、articles、first_round_article_list、"
-            "keyword_individual_planning 等替代字段。前端和后续 Brief 只读取 items。\n"
+            "keyword_individual_planning 等替代字段作为主结果。前端和后续 Brief 只读取 items。\n"
+            "本步骤必须严格执行 geo-content-matrix-planner：先做关键词总体判断、AI回答意图分组、文章类型池、AI回答逻辑、"
+            "证据链与资料缺口、共享支撑文、统一推荐口径、渠道规划、4-8周排期和 Brief 衔接要求，再输出首轮文章清单。\n"
+            "不要把内容矩阵做成逐词孤立标题列表；高度相关关键词应使用共享支撑文覆盖。\n"
+            "items 必须表示“首轮文章清单”，每一项是一篇可进入 Brief 的文章规划，不是关键词分组行。\n"
+            "items 至少覆盖 6 个必选文章板块，type 必须包含："
+            f"{' / '.join(MATRIX_REQUIRED_ARTICLE_TYPES)}。"
+            "如需扩展类型，总文章类型不得超过 10 个。\n"
             "items 中每一项都必须包含这些 key："
             f"{', '.join(PLANNING_ITEM_KEYS)}。\n"
-            "如果资料不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据。\n"
+            "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → 目标对象证据 → 用户价值 → 推荐结论”。\n"
+            "每个 item 都要写 recommendation_strength；榜单、横评、产品证据、FAQ 应形成明确优先推荐，支柱标准文不得硬广。\n"
+            "如果资料不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据、认证、排名、报告、专家、销量或案例。\n"
             f"```json\n{json.dumps(MATRIX_OUTPUT_TEMPLATE, ensure_ascii=False, indent=2)}\n```"
         )
     if step == "breakthrough":
@@ -707,6 +817,18 @@ def normalize_planning_output(step: WorkflowStep, result: dict[str, Any], payloa
     if step == "breakthrough":
         return normalize_breakthrough_output(result, payload)
     return result
+
+
+def prior_outputs_for_step(project: Any, step: WorkflowStep) -> dict[str, Any]:
+    if step not in STEP_ORDER:
+        return {}
+    step_index = STEP_ORDER.index(step)
+    upstream_steps = [candidate for candidate in STEP_ORDER[:step_index] if candidate != "materials"]
+    return {
+        candidate: project.steps[candidate].output
+        for candidate in upstream_steps
+        if candidate in project.steps and project.steps[candidate].output
+    }
 
 
 def normalize_intake_output(result: dict[str, Any]) -> dict[str, Any]:
@@ -824,17 +946,26 @@ def normalize_matrix_output(result: dict[str, Any]) -> dict[str, Any]:
     items = [normalize_planning_item("matrix", row, index) for index, row in enumerate(rows, start=1)]
     if not items:
         raise WorkflowError("内容矩阵输出格式不符合固定模板：未找到 items。")
+    validate_matrix_items(items)
     return {
         "step": "geo_content_matrix",
         "schema_version": PLANNING_SCHEMA_VERSION,
         "status": "completed",
         "project": normalize_project_block(result),
+        "keyword_overview": normalize_matrix_keyword_overview(result),
         "intent_groups": planning_array_by_keys(result, ["intent_groups", "keyword_intent_groups", "关键词意图分组", "二_关键词意图分组"]),
+        "article_type_pool": normalize_matrix_article_type_pool(result, items),
+        "answer_logic": planning_array_by_keys(result, ["answer_logic", "ai_answer_logic", "每组关键词背后的AI回答逻辑", "四_每组关键词背后的AI回答逻辑"]),
+        "keyword_planning": planning_array_by_keys(result, ["keyword_planning", "keyword_individual_planning", "关键词逐个规划", "五_关键词逐个规划"]),
         "items": items,
-        "evidence_gaps": planning_string_list_from(result, ["evidence_gaps", "evidence_chain_and_gaps", "证据缺口", "证据链与缺口"]),
-        "publishing_plan": planning_array_by_keys(result, ["publishing_plan", "publishing_channel_plan", "发布渠道规划"]),
-        "schedule": planning_array_by_keys(result, ["schedule", "execution_schedule", "执行排期"]),
-        "brief_requirements": planning_string_list_from(result, ["brief_requirements", "brief_connection_requirements", "Brief衔接要求"]),
+        "shared_supporting_articles": planning_array_by_keys(result, ["shared_supporting_articles", "shared_support_articles", "共享支撑文规划", "七_共享支撑文规划"]),
+        "unified_recommendation_language": planning_array_by_keys(result, ["unified_recommendation_language", "recommendation_language", "统一推荐口径", "八_统一推荐口径"]),
+        "evidence_gaps": planning_section_list_from(result, ["evidence_gaps", "evidence_chain_and_gaps", "证据缺口", "证据链与资料缺口", "九_证据链与资料缺口"]),
+        "publishing_plan": planning_array_by_keys(result, ["publishing_plan", "publishing_channel_plan", "发布渠道规划", "十_发布渠道规划"]),
+        "schedule": planning_array_by_keys(result, ["schedule", "execution_schedule", "执行排期", "十一_执行排期"]),
+        "priority_plan": planning_array_by_keys(result, ["priority_plan", "priority_ranking", "优先级排序", "十二_优先级排序"]),
+        "brief_requirements": planning_section_list_from(result, ["brief_requirements", "brief_connection_requirements", "后续Brief衔接要求", "十三_后续Brief衔接要求"]),
+        "final_execution_advice": first_planning_text(result, ["final_execution_advice", "最终执行建议", "十四_最终执行建议"]),
         "warnings": planning_string_list_from(result, ["warnings", "风险提示", "注意事项"]),
     }
 
@@ -909,6 +1040,49 @@ def validate_breakthrough_items(items: list[dict[str, Any]], confirmed_keywords:
         raise WorkflowError("逐词击破输出格式不完整：" + "；".join(errors))
 
 
+def validate_matrix_items(items: list[dict[str, Any]]) -> None:
+    present = {item["type"] for item in items if item.get("type")}
+    missing = [article_type for article_type in MATRIX_REQUIRED_ARTICLE_TYPES if article_type not in present]
+    article_type_count = len(present)
+    errors: list[str] = []
+    if missing:
+        errors.append(f"缺少必选文章板块：{'、'.join(missing)}")
+    if article_type_count > 10:
+        errors.append(f"文章类型超过 10 个：当前 {article_type_count} 个")
+    if errors:
+        raise WorkflowError("内容矩阵输出格式不完整：" + "；".join(errors))
+
+
+def normalize_matrix_keyword_overview(result: dict[str, Any]) -> dict[str, Any]:
+    overview = planning_record_by_keys(result, ["keyword_overview", "关键词总体判断", "一_关键词总体判断", "summary"])
+    return {
+        "common_goal": first_planning_text(overview, ["common_goal", "共同目标", "核心目标"], fallback=first_planning_text(result, ["common_goal", "共同目标"])),
+        "core_user_intents": planning_string_list_from(overview, ["core_user_intents", "核心用户意图", "主要意图"]),
+        "user_decision_stage": first_planning_text(overview, ["user_decision_stage", "用户所处决策阶段", "用户阶段"]),
+        "target_recommendation_cognition": first_planning_text(overview, ["target_recommendation_cognition", "目标推荐认知", "推荐认知"]),
+        "required_article_sections": MATRIX_REQUIRED_ARTICLE_TYPES,
+        "optional_article_sections": planning_string_list_from(overview, ["optional_article_sections", "行业扩展板块", "扩展板块"]),
+        "article_type_count_limit": 10,
+    }
+
+
+def normalize_matrix_article_type_pool(result: dict[str, Any], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = planning_array_by_keys(result, ["article_type_pool", "文章类型池与行业扩展判断", "三_文章类型池与行业扩展判断"])
+    if rows:
+        return rows
+    present = {item["type"] for item in items if item.get("type")}
+    return [
+        {
+            "type": article_type,
+            "usage": "必选" if article_type in MATRIX_REQUIRED_ARTICLE_TYPES else "选用",
+            "reason": "",
+            "covered_keywords_or_intent_groups": [],
+            "recommendation_strength": "",
+        }
+        for article_type in MATRIX_REQUIRED_ARTICLE_TYPES + [item_type for item_type in sorted(present) if item_type not in MATRIX_REQUIRED_ARTICLE_TYPES]
+    ]
+
+
 def normalize_planning_item(source_step: str, row: dict[str, Any], index: int) -> dict[str, Any]:
     raw_keyword = first_planning_text(
         row,
@@ -918,6 +1092,8 @@ def normalize_planning_item(source_step: str, row: dict[str, Any], index: int) -
     article_type = first_planning_text(row, ["type", "article_type", "main_article_type", "文章类型", "类型"])
     if source_step == "breakthrough":
         article_type = normalize_breakthrough_type(article_type, row, index)
+    else:
+        article_type = normalize_matrix_type(article_type)
     title = first_planning_text(row, ["title", "suggested_title", "article_title", "建议标题", "文章标题", "标题"], fallback=f"{keyword or '未标注关键词'}{article_type or '文章规划'}")
     source_id = first_planning_text(row, ["source_id", "sourceId"]) or planning_source_id(source_step, keyword, article_type, title, index)
     return {
@@ -931,9 +1107,16 @@ def normalize_planning_item(source_step: str, row: dict[str, Any], index: int) -
         "role": first_planning_text(row, ["role", "summary", "main_role", "主要作用", "主攻意图", "重点强化方向", "description"]),
         "core_recommendation": first_planning_text(row, ["core_recommendation", "core_recommendation_conclusion", "recommendation_logic", "核心推荐结论", "推荐逻辑"]),
         "required_evidence": planning_string_list_from(row, ["required_evidence", "core_evidence", "evidence", "必备证据", "核心证据"]),
+        "recommendation_strength": first_planning_text(row, ["recommendation_strength", "推荐强度"]),
+        "supporting_articles": planning_string_list_from(row, ["supporting_articles", "auxiliary_articles", "辅助文章", "共同支撑文章"]),
+        "evidence_chain": first_planning_text(row, ["evidence_chain", "content_evidence_chain", "证据链", "内容证据链"]),
+        "evidence_gaps": planning_string_list_from(row, ["evidence_gaps", "missing_evidence", "证据缺口"]),
         "competitor_boundary": first_planning_text(row, ["competitor_boundary", "competitor_comparison_boundary", "竞品边界", "竞品/对比对象边界"]),
         "channels": planning_string_list_from(row, ["channels", "recommended_channels", "channel", "recommendation_channel", "发布渠道", "推荐渠道"]),
         "brief_focus": first_planning_text(row, ["brief_focus", "brief_requirements", "后续Brief要点", "后续 Brief 要点", "Brief要点"]),
+        "outline_requirements": first_planning_text(row, ["outline_requirements", "article_outline", "文章结构大纲", "大纲要求"]),
+        "forbidden_expressions": planning_string_list_from(row, ["forbidden_expressions", "prohibited_expressions", "禁止出现的表达", "禁用表达"]),
+        "suggested_word_count": first_planning_text(row, ["suggested_word_count", "word_count", "建议字数"]),
         "priority": planning_int(row.get("priority") or row.get("priority_rank") or row.get("优先级"), index),
         "status": first_planning_text(row, ["status", "状态"], fallback="completed"),
     }
@@ -951,6 +1134,24 @@ def normalize_project_block(result: dict[str, Any]) -> dict[str, Any]:
         "recommendation_logic": first_planning_text(result, ["recommendation_logic", "core_recommendation_logic", "核心推荐方向"], fallback=first_planning_text(project, ["recommendation_logic", "core_recommendation_logic", "核心推荐方向"])),
         "expression_boundaries": planning_string_list_from(result, ["expression_boundaries", "global_expression_boundaries", "表达边界"], fallback=planning_string_list_from(project, ["expression_boundaries", "global_expression_boundaries", "表达边界"])),
     }
+
+
+def normalize_matrix_type(value: str) -> str:
+    normalized = " ".join(value.split())
+    if not normalized:
+        return normalized
+    lowered = normalized.lower()
+    if lowered in MATRIX_TYPE_ALIASES:
+        return MATRIX_TYPE_ALIASES[lowered]
+    if normalized in MATRIX_TYPE_ALIASES:
+        return MATRIX_TYPE_ALIASES[normalized]
+    for article_type in MATRIX_REQUIRED_ARTICLE_TYPES + MATRIX_OPTIONAL_ARTICLE_TYPES:
+        article_type_lowered = article_type.lower()
+        if normalized == article_type or article_type in normalized or normalized in article_type:
+            return article_type
+        if article_type_lowered in lowered or lowered in article_type_lowered:
+            return article_type
+    return normalized
 
 
 def normalize_breakthrough_type(value: str, row: dict[str, Any], index: int) -> str:
@@ -1032,6 +1233,19 @@ def planning_string_list_from(source: dict[str, Any], keys: list[str], fallback:
         if result:
             return result
     return fallback or []
+
+
+def planning_section_list_from(source: dict[str, Any], keys: list[str]) -> list[Any]:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            return [value]
+        result = normalize_string_list(value)
+        if result:
+            return result
+    return []
 
 
 def normalize_string_list(value: Any) -> list[str]:
@@ -1398,11 +1612,22 @@ def select_missing_sources(existing_output: dict[str, Any], payload: dict[str, A
         raise WorkflowError("请先选择要生成 Brief 的文章规划。")
     if payload.get("force"):
         return sources
-    existing_ids = {str(item.get("source_id")) for item in output_items(existing_output) if item.get("source_id")}
+    existing_ids = {
+        str(item.get("source_id"))
+        for item in output_items(existing_output)
+        if item.get("source_id") and brief_item_is_generated(item)
+    }
     missing = [source for source in sources if str(source.get("source_id")) not in existing_ids]
     if not missing:
         raise WorkflowError("选中项均已有 Brief，无需重复生成。")
     return missing
+
+
+def brief_item_is_generated(item: dict[str, Any]) -> bool:
+    status = str(item.get("status") or "").lower()
+    if status in {"failed", "running", "queued", "pending"}:
+        return False
+    return bool(item.get("markdown") or status in {"completed", "confirmed", "modified", "stale"})
 
 
 def select_missing_briefs(existing_output: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:

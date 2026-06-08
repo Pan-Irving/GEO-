@@ -1,6 +1,9 @@
 .DS_Store
 app-data/
 outputs/
+release/
+*.log
+*.pid
 
 backend/.venv/
 backend/__pycache__/
