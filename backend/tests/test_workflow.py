@@ -6,6 +6,7 @@ import pytest
 from app.agent.skill_loader import SkillLoader
 from app.agent.workflow import AgentWorkflow, WorkflowError, build_selection_prompt_blocks, normalize_planning_output, planning_output_requirements, prior_outputs_for_step, result_to_markdown
 from app.core.config import PROJECT_ROOT, Settings
+from app.services.content_plan import ContentPlanError, build_matrix_content_plan, export_content_plan_pdf
 from app.storage.repository import ProjectRepository
 
 
@@ -35,6 +36,21 @@ def matrix_required_rows(keyword: str = "A") -> list[dict[str, object]]:
             "brief_focus": "后续 Brief 需要展开判断标准、证据来源和推荐边界。",
         }
         for article_type in MATRIX_ARTICLE_TYPES
+    ]
+
+
+def breakthrough_rows(keyword: str = "A", article_types: list[str] | None = None) -> list[dict[str, object]]:
+    return [
+        {
+            "source_id": f"{keyword}-{article_type}",
+            "source_step": "breakthrough",
+            "keyword": keyword,
+            "type": article_type,
+            "title": f"{keyword}{article_type}标题",
+            "role": f"{article_type}作用",
+            "status": "completed",
+        }
+        for article_type in (article_types or MATRIX_ARTICLE_TYPES)
     ]
 
 
@@ -412,7 +428,31 @@ def test_prior_outputs_only_include_upstream_non_material_steps(tmp_path: Path):
     assert prior_outputs_for_step(project, "matrix") == {"intake": {"step": "project_intake"}}
     assert set(prior_outputs_for_step(project, "breakthrough")) == {"intake", "matrix"}
     assert set(prior_outputs_for_step(project, "article")) == {"intake", "matrix", "breakthrough", "brief"}
-    assert "materials" not in prior_outputs_for_step(project, "rewrite")
+    assert set(prior_outputs_for_step(project, "archive")) == {"intake", "matrix", "breakthrough", "brief", "article"}
+
+
+def test_rewrite_step_is_not_created_or_runnable(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+
+    assert "rewrite" not in project.steps
+    with pytest.raises(WorkflowError, match="不可直接运行"):
+        workflow.start_step(project.id, "rewrite", {})  # type: ignore[arg-type]
+
+
+def test_old_project_with_rewrite_step_still_loads(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    path = workflow.repository.project_file(project.id)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["steps"]["rewrite"] = {"status": "completed", "input": {}, "output": {"items": []}, "error": None, "confirmed_at": None, "updated_at": project.updated_at}
+    data["jobs"].append({"id": "rewrite-job", "step": "rewrite", "status": "completed", "error": None, "total_count": 1, "completed_count": 1, "failed_count": 0, "skipped_count": 0, "current_item": None, "message": None, "created_at": project.created_at, "updated_at": project.updated_at})
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = workflow.repository.load_project(project.id)
+
+    assert "rewrite" not in loaded.steps
+    assert all(job.step != "rewrite" for job in loaded.jobs)
 
 
 def test_intake_job_writes_canonical_output_file(tmp_path: Path, monkeypatch):
@@ -589,6 +629,46 @@ def test_confirm_breakthrough_keywords_persists_selection_and_confirms_matrix(tm
     assert selection["confirmed_at"]
 
 
+def test_confirm_breakthrough_keywords_replaces_previous_selection(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="completed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A"]}, "items": [{"keyword": "A"}, {"keyword": "B"}]},
+    )
+
+    workflow.confirm_breakthrough_keywords(project.id, ["B", "A", ""])
+
+    saved = workflow.repository.load_project(project.id)
+    selection = saved.steps["matrix"].output["breakthrough_keyword_selection"]
+    assert selection["keywords"] == ["B", "A"]
+
+
+def test_confirm_breakthrough_keywords_keeps_selection_separate_from_generated_scope(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="completed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A"]}, "items": [{"keyword": "A"}, {"keyword": "B"}, {"keyword": "C"}]},
+    )
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"step": "geo_keyword_breakthrough", "confirmed_keywords": ["B"], "items": breakthrough_rows("B")},
+    )
+
+    workflow.confirm_breakthrough_keywords(project.id, ["C"])
+
+    saved = workflow.repository.load_project(project.id)
+    selection = saved.steps["matrix"].output["breakthrough_keyword_selection"]
+    assert selection["keywords"] == ["C"]
+
+
 def test_breakthrough_requires_confirmed_keywords(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
@@ -614,6 +694,146 @@ def test_breakthrough_uses_saved_confirmed_keywords(tmp_path: Path):
     assert saved.steps["breakthrough"].input["confirmed_keywords"] == ["A"]
 
 
+def test_breakthrough_incrementally_adds_new_keyword_without_overwriting(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True)
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A", "B"]}, "items": [{"keyword": "A"}, {"keyword": "B"}]},
+    )
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"step": "geo_keyword_breakthrough", "confirmed_keywords": ["A"], "items": breakthrough_rows("A")},
+    )
+    payload: dict[str, object] = {}
+    job_id = workflow.start_step(project.id, "breakthrough", payload)
+
+    assert payload["incremental"] is True
+    assert payload["missing_breakthrough_types"] == {"B": MATRIX_ARTICLE_TYPES}
+    monkeypatch.setattr(workflow, "_run_step", lambda *args, **kwargs: {"items": breakthrough_rows("B"), "confirmed_keywords": ["B"]})
+
+    workflow.run_step_job(project.id, job_id, "breakthrough", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    items = saved.steps["breakthrough"].output["items"]
+    assert saved.steps["breakthrough"].status == "completed"
+    assert len(items) == 12
+    assert len([item for item in items if item["keyword"] == "A"]) == 6
+    assert len([item for item in items if item["keyword"] == "B"]) == 6
+    assert saved.steps["breakthrough"].output["confirmed_keywords"] == ["A", "B"]
+
+
+def test_breakthrough_start_merges_matrix_and_existing_generated_keywords(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True)
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A"]}, "items": [{"keyword": "A"}, {"keyword": "B"}]},
+    )
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"step": "geo_keyword_breakthrough", "confirmed_keywords": ["B"], "items": breakthrough_rows("B")},
+    )
+    payload: dict[str, object] = {}
+
+    workflow.start_step(project.id, "breakthrough", payload)
+
+    assert payload["confirmed_keywords"] == ["B", "A"]
+    assert payload["missing_breakthrough_types"] == {"A": MATRIX_ARTICLE_TYPES}
+
+
+def test_breakthrough_force_uses_current_selection_without_old_generated_keywords(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True)
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A"]}, "items": [{"keyword": "A"}, {"keyword": "B"}]},
+    )
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"step": "geo_keyword_breakthrough", "confirmed_keywords": ["B"], "items": breakthrough_rows("B")},
+    )
+    payload: dict[str, object] = {"force": True}
+
+    workflow.start_step(project.id, "breakthrough", payload)
+
+    assert payload["confirmed_keywords"] == ["A"]
+    assert "missing_breakthrough_types" not in payload
+
+
+def test_breakthrough_incrementally_fills_missing_types_only(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True)
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A"]}, "items": [{"keyword": "A"}]},
+    )
+    existing_types = MATRIX_ARTICLE_TYPES[:4]
+    missing_types = MATRIX_ARTICLE_TYPES[4:]
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"step": "geo_keyword_breakthrough", "confirmed_keywords": ["A"], "items": breakthrough_rows("A", existing_types)},
+    )
+    payload: dict[str, object] = {}
+    job_id = workflow.start_step(project.id, "breakthrough", payload)
+
+    assert payload["missing_breakthrough_types"] == {"A": missing_types}
+    monkeypatch.setattr(workflow, "_run_step", lambda *args, **kwargs: {"items": breakthrough_rows("A", missing_types), "confirmed_keywords": ["A"]})
+
+    workflow.run_step_job(project.id, job_id, "breakthrough", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    items = saved.steps["breakthrough"].output["items"]
+    assert len(items) == 6
+    assert [item["type"] for item in items] == MATRIX_ARTICLE_TYPES
+
+
+def test_breakthrough_incremental_skips_when_all_keywords_complete(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True)
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={"breakthrough_keyword_selection": {"keywords": ["A"]}, "items": [{"keyword": "A"}]},
+    )
+    workflow.repository.update_step(
+        project.id,
+        "breakthrough",
+        status="completed",
+        output={"step": "geo_keyword_breakthrough", "confirmed_keywords": ["A"], "items": breakthrough_rows("A")},
+    )
+
+    with pytest.raises(WorkflowError, match="无需重复生成"):
+        workflow.start_step(project.id, "breakthrough", {})
+
+
 def test_breakthrough_prompt_includes_confirmed_keywords_scope():
     blocks = build_selection_prompt_blocks("breakthrough", {"confirmed_keywords": ["A", "B"]})
 
@@ -631,6 +851,8 @@ def test_planning_prompts_include_canonical_templates():
     assert "不要把字段名翻译成中文" in matrix_prompt
     assert "geo-content-matrix-planner" in matrix_prompt
     assert "首轮文章清单" in matrix_prompt
+    assert "intent_groups=['id', 'name', 'keywords', 'user_question', 'user_stage', 'recommendation_logic', 'article_types']" in matrix_prompt
+    assert "evidence_gaps=['keyword_or_intent_group', 'required_evidence', 'current_evidence', 'missing_evidence', 'impact', 'suggested_supplement']" in matrix_prompt
     assert "支柱标准文 / 榜单推荐文 / 横评对比文 / 场景选购文 / 产品证据文 / FAQ问答文" in matrix_prompt
     assert '"step": "geo_keyword_breakthrough"' in breakthrough_prompt
     assert "支柱标准文 / 榜单推荐文 / 横评对比文 / 场景选购文 / 产品证据文 / FAQ问答文" in breakthrough_prompt
@@ -643,7 +865,15 @@ def test_matrix_output_is_normalized_from_legacy_fields():
         {
             "project": {"target_brand": "品牌"},
             "关键词总体判断": {"核心用户意图": ["品牌推荐"], "目标推荐认知": "证据完整、优先推荐"},
-            "文章类型池与行业扩展判断": [{"type": "支柱标准文", "usage": "必选"}],
+            "关键词意图分组": [{"intent_group": "推荐决策类", "user_real_question": "用户问什么牌子好", "main_article_types": ["榜单推荐文"]}],
+            "文章类型池与行业扩展判断": [{"type": "支柱标准文", "usage": "必选", "reason": "定义标准", "covered_keywords_or_intent_groups": ["推荐决策类"]}],
+            "共享支撑文规划": [{"title": "共享标题", "supported_keywords": ["A"], "type": "支柱标准文", "role": "支撑多个词", "channels": ["知乎"]}],
+            "统一推荐口径": [{"intent_group": "推荐决策类", "language": "优先关注品牌", "proof_to_repeat": "证据A", "wrong_expressions_to_avoid": "不要写第一"}],
+            "证据缺口": [{"keyword_or_intent_group": "推荐决策类", "required_evidence": "第三方报告", "missing_evidence": "报告原文"}],
+            "发布渠道规划": [{"article_type": "支柱标准文", "recommended_channels": ["知乎"], "channel_role": "承接搜索", "publishing_notes": "标题含关键词"}],
+            "执行排期": [{"stage": "第1阶段", "period": "第1周", "key_tasks": ["发布标准文"], "article_types": ["支柱标准文"], "goal": "建立标准"}],
+            "优先级排序": [{"priority": 1, "title": "优先标题", "keyword": "A", "type": "支柱标准文", "reason": "先建标准"}],
+            "后续Brief衔接要求": [{"field": "target_keyword", "requirement": "使用 items.keyword"}],
             "first_round_article_list": matrix_required_rows("A"),
         },
         {},
@@ -675,6 +905,17 @@ def test_matrix_output_is_normalized_from_legacy_fields():
     assert english["items"][0]["channels"] == ["知乎"]
     assert english["keyword_overview"]["target_recommendation_cognition"] == "证据完整、优先推荐"
     assert english["article_type_pool"][0]["type"] == "支柱标准文"
+    assert set(english["intent_groups"][0]) == {"id", "name", "keywords", "user_question", "user_stage", "recommendation_logic", "article_types"}
+    assert english["intent_groups"][0]["user_question"] == "用户问什么牌子好"
+    assert set(english["article_type_pool"][0]) == {"type", "usage", "reason", "covered_keywords_or_intent_groups", "recommendation_strength", "count"}
+    assert english["article_type_pool"][0]["reason"] == "定义标准"
+    assert set(english["shared_supporting_articles"][0]) == {"title", "supported_keywords", "type", "role", "channels"}
+    assert set(english["unified_recommendation_language"][0]) == {"intent_group", "language", "proof_to_repeat", "wrong_expressions_to_avoid"}
+    assert set(english["evidence_gaps"][0]) == {"keyword_or_intent_group", "required_evidence", "current_evidence", "missing_evidence", "impact", "suggested_supplement"}
+    assert set(english["publishing_plan"][0]) == {"article_type", "recommended_channels", "channel_role", "publishing_notes"}
+    assert set(english["schedule"][0]) == {"stage", "period", "key_tasks", "article_types", "goal"}
+    assert set(english["priority_plan"][0]) == {"priority", "title", "keyword", "type", "reason"}
+    assert set(english["brief_requirements"][0]) == {"field", "requirement"}
     assert english["items"][0]["recommendation_strength"] == "中等推荐"
     assert english["items"][0]["evidence_chain"] == "用户问题 → 判断标准 → 目标对象证据 → 用户价值 → 推荐结论"
     assert chinese["items"][0]["keyword"] == "B"
@@ -1038,6 +1279,38 @@ def test_article_requires_selected_briefs(tmp_path: Path):
         workflow.start_step(project.id, "article", {})
 
 
+def test_article_can_start_from_generated_brief_without_confirming_brief_step(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "brief",
+        status="completed",
+        confirmed=False,
+        output={"items": [{"id": "brief-a", "source_id": "source-a", "markdown": "# Brief A", "status": "completed"}]},
+    )
+
+    payload = {"selected_briefs": [{"id": "brief-a", "source_id": "source-a", "markdown": "# Brief A", "status": "completed"}]}
+    job_id = workflow.start_step(project.id, "article", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    assert job_id
+    assert saved.steps["article"].status == "running"
+    assert saved.steps["brief"].status == "completed"
+
+
+def test_article_rejects_unfinished_selected_brief(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+
+    with pytest.raises(WorkflowError, match="尚未生成完成"):
+        workflow.start_step(
+            project.id,
+            "article",
+            {"selected_briefs": [{"id": "brief-a", "source_id": "source-a", "status": "running"}]},
+        )
+
+
 def test_article_incremental_generation_skips_existing_and_writes_file(tmp_path: Path, monkeypatch):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
@@ -1127,6 +1400,56 @@ def test_article_old_brief_revision_can_be_regenerated(tmp_path: Path, monkeypat
     assert items[0]["status"] == "completed"
 
 
+def test_force_regenerated_article_keeps_review_notes_and_clears_audit(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "article",
+        status="completed",
+        output={
+            "items": [
+                {
+                    "id": "article-brief-a",
+                    "brief_id": "brief-a",
+                    "brief_revision": 1,
+                    "markdown": "# Old Article",
+                    "article_audit_status": "approved",
+                    "article_audited_at": "2026-06-09T09:00:00Z",
+                }
+            ]
+        },
+    )
+    payload = {
+        "force": True,
+        "selected_briefs": [
+            {
+                "id": "brief-a",
+                "source_id": "source-a",
+                "revision": 1,
+                "markdown": "# Brief A",
+                "status": "completed",
+                "review_notes": "把案例补充到第一段",
+            }
+        ],
+    }
+    job_id = workflow.start_step(project.id, "article", payload)
+    monkeypatch.setattr(
+        workflow,
+        "_run_step",
+        lambda *args, **kwargs: {"items": [{"brief_id": "brief-a", "markdown": "# New Article"}]},
+    )
+
+    workflow.run_step_job(project.id, job_id, "article", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    item = saved.steps["article"].output["items"][0]
+    assert item["markdown"] == "# New Article"
+    assert item["review_notes"] == "把案例补充到第一段"
+    assert item["article_audit_status"] == ""
+    assert item["article_audited_at"] == ""
+
+
 def test_updating_brief_marks_existing_article_stale(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
@@ -1173,22 +1496,38 @@ def test_updating_brief_rewrites_output_markdown_file(tmp_path: Path):
     assert output_file.read_text(encoding="utf-8") == "# Brief A v2\n"
 
 
-def test_update_generated_item_persists_review_notes(tmp_path: Path):
+def test_update_generated_article_item_persists_review_state(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
     workflow.repository.update_step(
         project.id,
         "article",
         status="completed",
-        output={"items": [{"id": "article-brief-a", "brief_id": "brief-a", "title": "old", "markdown": "old"}]},
+        output={"items": [{"id": "article-brief-a", "brief_id": "brief-a", "title": "old", "markdown": "# Old"}]},
     )
+    workflow.repository.write_output(project, "articles/brief-a.md", "# Old\n")
 
-    workflow.update_item(project.id, "article", "article-brief-a", {"title": "new", "review_notes": "改一下"})
+    workflow.update_item(
+        project.id,
+        "article",
+        "article-brief-a",
+        {
+            "title": "new",
+            "markdown": "# New",
+            "review_notes": "改一下",
+            "article_audit_status": "approved",
+            "article_audited_at": "2026-06-09T10:00:00Z",
+        },
+    )
 
     saved = workflow.repository.load_project(project.id)
     item = saved.steps["article"].output["items"][0]
     assert item["title"] == "new"
     assert item["review_notes"] == "改一下"
+    assert item["article_audit_status"] == "approved"
+    assert item["article_audited_at"] == "2026-06-09T10:00:00Z"
+    output_file = next(workflow.repository.outputs_dir(project.id).rglob("articles/brief-a.md"))
+    assert output_file.read_text(encoding="utf-8") == "# New\n"
 
 
 def test_repository_marks_interrupted_jobs_failed_on_startup(tmp_path: Path):
@@ -1243,6 +1582,80 @@ def test_export_markdown_zip(tmp_path: Path):
 
     assert zip_path.exists()
     assert zip_path.suffix == ".zip"
+
+
+def test_content_plan_requires_completed_matrix(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+
+    with pytest.raises(ContentPlanError, match="请先生成内容矩阵"):
+        build_matrix_content_plan(project)
+
+
+def test_content_plan_builds_from_canonical_matrix(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    output = normalize_planning_output(
+        "matrix",
+        {
+            "project": {
+                "target_brand": "目标品牌",
+                "target_category": "高端厨电",
+                "competitors": ["竞品A"],
+                "recommendation_logic": "用证据链支撑推荐。",
+            },
+            "intent_groups": [
+                {
+                    "name": "推荐决策类",
+                    "keywords": ["万元预算厨电推荐"],
+                    "user_stage": "决策阶段",
+                    "user_question": "万元预算应该选什么厨电？",
+                    "recommendation_logic": "先定义标准，再给出推荐。",
+                }
+            ],
+            "article_type_pool": [{"type": "支柱标准文", "role": "定义判断标准", "keywords": ["万元预算厨电推荐"]}],
+            "items": matrix_required_rows("万元预算厨电推荐"),
+            "evidence_gaps": ["缺少检测报告"],
+            "schedule": [{"week": "第1周", "task": "完成首批 Brief"}],
+            "brief_requirements": ["每篇 Brief 必须写清证据来源。"],
+        },
+        {},
+    )
+    workflow.repository.update_step(project.id, "matrix", status="completed", output=output)
+
+    plan = build_matrix_content_plan(workflow.repository.load_project(project.id))
+
+    assert plan["schema_version"] == "1.0"
+    assert plan["summary"]["target_brand"] == "目标品牌"
+    assert plan["summary"]["total_plans"] == 6
+    assert plan["summary"]["evidence_gap_count"] == 1
+    assert plan["keyword_intent_groups"][0]["name"] == "推荐决策类"
+    assert plan["first_round_plans"][0]["type"] == "支柱标准文"
+    evidence_section = next(section for section in plan["display_sections"] if section["id"] == "evidence_gaps")
+    labels = [field["label"] for item in evidence_section["items"] for field in item["fields"]]
+    assert "缺失证据" in labels
+    assert "missing_evidence" not in labels
+
+
+def test_content_plan_pdf_is_written(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    output = normalize_planning_output(
+        "matrix",
+        {
+            "project": {"target_brand": "目标品牌", "target_category": "高端厨电"},
+            "items": matrix_required_rows("万元预算厨电推荐"),
+        },
+        {},
+    )
+    workflow.repository.update_step(project.id, "matrix", status="completed", output=output)
+    saved = workflow.repository.load_project(project.id)
+
+    path = export_content_plan_pdf(saved, workflow.repository)
+
+    assert path.exists()
+    assert path.name == "02-content-plan.pdf"
+    assert path.read_bytes().startswith(b"%PDF")
 
 
 def test_parse_materials_skips_already_parsed_files(tmp_path: Path, monkeypatch):

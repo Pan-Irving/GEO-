@@ -14,7 +14,9 @@ from app.models.schemas import (
     UpdateItemRequest,
     WorkflowStep,
 )
+from app.services.content_plan import ContentPlanError, build_matrix_content_plan, export_content_plan_pdf
 from app.storage.repository import ProjectRepository
+from app.utils.files import safe_filename, today
 
 router = APIRouter(prefix="/api")
 
@@ -205,6 +207,26 @@ def get_logs(project_id: str, repository: ProjectRepository = Depends(get_reposi
 def get_outputs(project_id: str, repository: ProjectRepository = Depends(get_repository)):
     load_or_404(repository, project_id)
     return {"files": repository.output_files(project_id)}
+
+
+@router.get("/projects/{project_id}/content-plan")
+def get_content_plan(project_id: str, repository: ProjectRepository = Depends(get_repository)):
+    project = load_or_404(repository, project_id)
+    try:
+        return build_matrix_content_plan(project)
+    except ContentPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/export/content-plan.pdf")
+def export_content_plan(project_id: str, repository: ProjectRepository = Depends(get_repository)):
+    project = load_or_404(repository, project_id)
+    try:
+        path = export_content_plan_pdf(project, repository)
+    except ContentPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"内容规划-{safe_filename(project.name)}-{today()}.pdf"
+    return FileResponse(path, filename=filename, media_type="application/pdf")
 
 
 @router.get("/projects/{project_id}/export/markdown.zip")

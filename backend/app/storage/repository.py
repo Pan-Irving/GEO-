@@ -85,8 +85,15 @@ class ProjectRepository:
             raise FileNotFoundError(f"Project not found: {project_id}")
         data = json.loads(path.read_text(encoding="utf-8"))
         data.setdefault("custom_sources", [])
-        for step in STEP_ORDER:
-            data.setdefault("steps", {}).setdefault(step, StepState().model_dump())
+        raw_steps = data.setdefault("steps", {})
+        data["steps"] = {
+            step: raw_steps.get(step, StepState().model_dump())
+            for step in STEP_ORDER
+        }
+        data["jobs"] = [
+            job for job in data.get("jobs", [])
+            if isinstance(job, dict) and job.get("step") in STEP_ORDER
+        ]
         normalize_blocked_step_states(data)
         return Project.model_validate(data)
 
@@ -262,6 +269,14 @@ class ProjectRepository:
         path.write_text(content, encoding="utf-8")
         return path
 
+    def write_binary_output(self, project: Project, relative_path: str, content: bytes) -> Path:
+        output_root = self.outputs_dir(project.id) / slugify(project.name) / today()
+        output_root.mkdir(parents=True, exist_ok=True)
+        path = output_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return path
+
     def rewrite_latest_output(self, project: Project, relative_path: str, content: str) -> Path:
         root = self.outputs_dir(project.id)
         matches: list[Path] = []
@@ -365,7 +380,6 @@ def blocked_step_label(step: str) -> str:
         "breakthrough": "逐词击破",
         "brief": "Brief",
         "article": "正文",
-        "rewrite": "改写稿",
     }.get(step, step)
 
 

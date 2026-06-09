@@ -5,7 +5,6 @@ export type WorkflowStep =
   | "breakthrough"
   | "brief"
   | "article"
-  | "rewrite"
   | "archive";
 
 export type StepStatus = "pending" | "running" | "completed" | "confirmed" | "failed";
@@ -81,4 +80,34 @@ export interface Project {
   custom_sources: CustomSource[];
   steps: Record<WorkflowStep, StepState>;
   jobs: Job[];
+}
+
+export interface ContentPlan {
+  schema_version: string;
+  project_id: string;
+  project_name: string;
+  generated_at: string;
+  summary: Record<string, unknown>;
+  project: Record<string, unknown>;
+  keyword_intent_groups: Array<Record<string, unknown>>;
+  article_type_pool: Array<Record<string, unknown>>;
+  first_round_plans: Array<Record<string, unknown>>;
+  shared_supporting_articles: unknown[];
+  unified_recommendation_language: unknown[];
+  evidence_gaps: unknown[];
+  publishing_plan: unknown[];
+  schedule: unknown[];
+  brief_requirements: unknown[];
+  final_execution_advice: string;
+  warnings: unknown[];
+  display_sections?: Array<{
+    id: string;
+    title: string;
+    items: Array<{
+      fields: Array<{
+        label: string;
+        value: string;
+      }>;
+    }>;
+  }>;
 }

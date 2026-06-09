@@ -11,7 +11,6 @@ WorkflowStep = Literal[
     "breakthrough",
     "brief",
     "article",
-    "rewrite",
     "archive",
 ]
 
@@ -22,7 +21,6 @@ STEP_ORDER: list[WorkflowStep] = [
     "breakthrough",
     "brief",
     "article",
-    "rewrite",
     "archive",
 ]
 
@@ -32,7 +30,6 @@ RUNNABLE_STEPS: list[WorkflowStep] = [
     "breakthrough",
     "brief",
     "article",
-    "rewrite",
 ]
 
 

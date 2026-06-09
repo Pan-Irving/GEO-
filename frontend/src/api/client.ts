@@ -1,4 +1,4 @@
-import type { CustomSourcePayload, Project, WorkflowStep } from "./types";
+import type { ContentPlan, CustomSourcePayload, Project, WorkflowStep } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -16,6 +16,34 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       throw new Error(body.detail || `Request failed: ${response.status}`);
     }
     return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请刷新状态后重试。");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function requestBlob(url: string, init?: RequestInit): Promise<Blob> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: init?.signal || controller.signal
+    });
+    if (!response.ok) {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed: ${response.status}`);
+      }
+      const text = await response.text().catch(() => "");
+      throw new Error(text || `Request failed: ${response.status}`);
+    }
+    return response.blob();
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error("请求超时，请刷新状态后重试。");
@@ -74,5 +102,7 @@ export const api = {
       body: JSON.stringify({ payload })
     }),
   getLogs: (projectId: string) => request<{ logs: string }>(`/api/projects/${projectId}/logs`),
-  getOutputs: (projectId: string) => request<{ files: string[] }>(`/api/projects/${projectId}/outputs`)
+  getOutputs: (projectId: string) => request<{ files: string[] }>(`/api/projects/${projectId}/outputs`),
+  getContentPlan: (projectId: string) => request<ContentPlan>(`/api/projects/${projectId}/content-plan`),
+  exportContentPlanPdf: (projectId: string) => requestBlob(`/api/projects/${projectId}/export/content-plan.pdf`)
 };

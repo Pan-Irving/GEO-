@@ -7,7 +7,6 @@ STEP_REFERENCES = {
     "breakthrough": ["geo-keyword-breakthrough-planner.md"],
     "brief": ["article-brief-generator.md"],
     "article": ["article-draft-generator.md"],
-    "rewrite": ["article-draft-generator.md"],
 }
 
 
