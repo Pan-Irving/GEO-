@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import uuid
@@ -29,6 +30,14 @@ class ProjectRepository:
         self.save_project(project)
         self.log(project_id, f"项目创建：{name}")
         return project
+
+    def delete_project(self, project_id: str) -> None:
+        self.load_project(project_id)
+        project_path = self.project_dir(project_id).resolve()
+        projects_root = self.projects_root.resolve()
+        if projects_root not in project_path.parents:
+            raise ValueError("Invalid project path")
+        shutil.rmtree(project_path)
 
     def list_projects(self) -> list[Project]:
         projects: list[Project] = []
@@ -70,9 +79,11 @@ class ProjectRepository:
                     state["updated_at"] = utc_now()
                     changed = True
             for job in data.get("jobs", []):
-                if job.get("status") in {"queued", "running"}:
-                    job["status"] = "failed"
-                    job["error"] = "服务重启或任务中断，请重新运行该步骤。"
+                if job.get("status") in {"queued", "running", "cancelling"}:
+                    cancelled = job.get("status") == "cancelling"
+                    job["status"] = "cancelled" if cancelled else "failed"
+                    job["error"] = "任务已停止。" if cancelled else "服务重启或任务中断，请重新运行该步骤。"
+                    job["message"] = "任务已停止。" if cancelled else job.get("message")
                     job["updated_at"] = utc_now()
                     changed = True
             if changed:
@@ -116,6 +127,7 @@ class ProjectRepository:
             stored_name=stored_name,
             content_type=content_type,
             size=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
         )
         project.materials.append(material)
         self.save_project(project)
@@ -128,6 +140,79 @@ class ProjectRepository:
         self.save_project(project)
         return project
 
+    def delete_material(self, project_id: str, material_id: str) -> Project:
+        project = self.load_project(project_id)
+        target = next((item for item in project.materials if item.id == material_id), None)
+        if not target:
+            raise FileNotFoundError(f"Material not found: {material_id}")
+
+        material_path = self.materials_dir(project_id) / target.stored_name
+        if material_path.exists():
+            material_path.unlink()
+        if target.parsed_path:
+            parsed_path = self.project_dir(project_id) / target.parsed_path
+            if parsed_path.exists() and parsed_path.is_file():
+                parsed_path.unlink()
+
+        project.materials = [item for item in project.materials if item.id != material_id]
+        state = project.steps["materials"]
+        state.status = "pending"
+        state.output = {}
+        state.error = None
+        state.confirmed_at = None
+        state.updated_at = utc_now()
+        project.steps["materials"] = state
+        self.save_project(project)
+        self.log(project_id, f"删除资料：{target.filename}")
+        return project
+
+    def create_matrix_import_draft(self, project_id: str, filename: str, content_type: str | None, content: bytes) -> dict[str, Any]:
+        self.load_project(project_id)
+        draft_id = uuid.uuid4().hex
+        draft_dir = self.matrix_import_dir(project_id, draft_id)
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        stored_name = f"source-{safe_filename(filename)}"
+        source_path = draft_dir / stored_name
+        source_path.write_bytes(content)
+        draft = {
+            "id": draft_id,
+            "status": "queued",
+            "filename": filename,
+            "stored_name": stored_name,
+            "content_type": content_type,
+            "size": len(content),
+            "source_path": str(source_path.relative_to(self.project_dir(project_id))),
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "job_id": None,
+            "parsed_chars": 0,
+            "stats": {},
+            "warnings": [],
+            "output": {},
+            "error": None,
+        }
+        self.save_matrix_import_draft(project_id, draft_id, draft)
+        self.log(project_id, f"上传内容规划导入草稿：{filename}")
+        return draft
+
+    def load_matrix_import_draft(self, project_id: str, draft_id: str) -> dict[str, Any]:
+        path = self.matrix_import_file(project_id, draft_id)
+        if not path.exists():
+            raise FileNotFoundError(f"Matrix import draft not found: {draft_id}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def save_matrix_import_draft(self, project_id: str, draft_id: str, draft: dict[str, Any]) -> dict[str, Any]:
+        path = self.matrix_import_file(project_id, draft_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        draft["updated_at"] = utc_now()
+        path.write_text(json.dumps(draft, ensure_ascii=False, indent=2), encoding="utf-8")
+        return draft
+
+    def update_matrix_import_draft(self, project_id: str, draft_id: str, **updates: Any) -> dict[str, Any]:
+        draft = self.load_matrix_import_draft(project_id, draft_id)
+        draft.update(updates)
+        return self.save_matrix_import_draft(project_id, draft_id, draft)
+
     def create_custom_source(self, project_id: str, payload: dict[str, Any]) -> Project:
         project = self.load_project(project_id)
         source = normalize_custom_source(project, payload)
@@ -136,6 +221,26 @@ class ProjectRepository:
         project.custom_sources.append(source)
         self.save_project(project)
         self.log(project_id, f"新增自定义文章规划：{source.title}")
+        return project
+
+    def create_custom_sources(self, project_id: str, payload: dict[str, Any]) -> Project:
+        project = self.load_project(project_id)
+        titles = unique_custom_titles(payload.get("titles"))
+        if not titles:
+            raise ValueError("请至少填写一个自定义文章标题。")
+        existing_ids = {source.source_id for source in project.custom_sources}
+        next_sources: list[CustomSource] = []
+        next_ids: set[str] = set()
+        for title in titles:
+            source_payload = {**payload, "title": title}
+            source = normalize_custom_source(project, source_payload)
+            if source.source_id in existing_ids or source.source_id in next_ids:
+                raise ValueError(f"同标题的自定义文章已存在：{title}")
+            next_sources.append(source)
+            next_ids.add(source.source_id)
+        project.custom_sources.extend(next_sources)
+        self.save_project(project)
+        self.log(project_id, f"批量新增自定义文章规划：{len(next_sources)} 篇")
         return project
 
     def update_custom_source(self, project_id: str, source_id: str, payload: dict[str, Any]) -> Project:
@@ -243,7 +348,9 @@ class ProjectRepository:
         project = self.load_project(project_id)
         for job in project.jobs:
             if job.id == job_id:
-                job.status = status  # type: ignore[assignment]
+                preserve_cancel_state = job.status in {"cancelling", "cancelled"} and status == "running"
+                if not preserve_cancel_state:
+                    job.status = status  # type: ignore[assignment]
                 job.error = error
                 if total_count is not None:
                     job.total_count = total_count
@@ -254,12 +361,40 @@ class ProjectRepository:
                 if skipped_count is not None:
                     job.skipped_count = skipped_count
                 job.current_item = current_item
-                if message is not None:
+                if message is not None and not preserve_cancel_state:
                     job.message = message
+                elif preserve_cancel_state and not job.message:
+                    job.message = "正在停止任务。" if job.status == "cancelling" else "任务已停止。"
                 job.updated_at = utc_now()
                 break
         self.save_project(project)
         return project
+
+    def cancel_job(self, project_id: str, job_id: str) -> Project:
+        project = self.load_project(project_id)
+        found = False
+        for job in project.jobs:
+            if job.id != job_id:
+                continue
+            found = True
+            if job.status in {"queued", "running"}:
+                job.status = "cancelling"
+                job.message = "正在停止任务，当前正在执行的单个请求完成后会停止后续操作。"
+                job.error = None
+                job.updated_at = utc_now()
+            break
+        if not found:
+            raise FileNotFoundError(f"Job not found: {job_id}")
+        self.save_project(project)
+        self.log(project_id, f"请求停止任务：{job_id}")
+        return project
+
+    def job_cancel_requested(self, project_id: str, job_id: str) -> bool:
+        project = self.load_project(project_id)
+        for job in project.jobs:
+            if job.id == job_id:
+                return job.status in {"cancelling", "cancelled"}
+        return False
 
     def write_output(self, project: Project, relative_path: str, content: str) -> Path:
         output_root = self.outputs_dir(project.id) / slugify(project.name) / today()
@@ -327,8 +462,22 @@ class ProjectRepository:
     def parsed_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "parsed"
 
+    def parse_cache_dir(self) -> Path:
+        path = self.data_root / "parse-cache"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def outputs_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "outputs"
+
+    def matrix_imports_dir(self, project_id: str) -> Path:
+        return self.project_dir(project_id) / "imports" / "content-plan"
+
+    def matrix_import_dir(self, project_id: str, draft_id: str) -> Path:
+        return self.matrix_imports_dir(project_id) / safe_filename(draft_id)
+
+    def matrix_import_file(self, project_id: str, draft_id: str) -> Path:
+        return self.matrix_import_dir(project_id, draft_id) / "draft.json"
 
 
 def normalize_blocked_step_states(data: dict[str, Any]) -> None:
@@ -446,6 +595,20 @@ def required_custom_text(payload: dict[str, Any], key: str, label: str) -> str:
     if not value:
         raise ValueError(f"请填写自定义文章的{label}。")
     return value
+
+
+def unique_custom_titles(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    titles: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        title = clean_custom_text(item)
+        if not title or title in seen:
+            continue
+        titles.append(title)
+        seen.add(title)
+    return titles
 
 
 def clean_custom_text(value: Any) -> str:

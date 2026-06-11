@@ -14,6 +14,9 @@ WorkflowStep = Literal[
     "archive",
 ]
 
+ParseMode = Literal["smart", "text_only", "full_ocr"]
+ParseSource = Literal["fresh", "cache", "skipped_existing"]
+
 STEP_ORDER: list[WorkflowStep] = [
     "materials",
     "intake",
@@ -48,9 +51,16 @@ class Material(BaseModel):
     stored_name: str
     content_type: str | None = None
     size: int = 0
+    sha256: str | None = None
     parsed_path: str | None = None
     status: Literal["uploaded", "parsed", "failed"] = "uploaded"
     error: str | None = None
+    parse_mode: ParseMode | None = None
+    parser_version: str | None = None
+    parse_source: ParseSource | None = None
+    parsed_chars: int = 0
+    ocr_pages: int = 0
+    parsed_at: str | None = None
 
 
 class CustomSource(BaseModel):
@@ -73,7 +83,7 @@ class CustomSource(BaseModel):
 class Job(BaseModel):
     id: str
     step: WorkflowStep
-    status: Literal["queued", "running", "completed", "failed"] = "queued"
+    status: Literal["queued", "running", "cancelling", "cancelled", "completed", "failed"] = "queued"
     error: str | None = None
     total_count: int = 0
     completed_count: int = 0
@@ -100,8 +110,17 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
 
+class ParseMaterialsRequest(BaseModel):
+    mode: ParseMode = "smart"
+    force: bool = False
+
+
 class RunStepRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApplyMatrixImportRequest(BaseModel):
+    overwrite: bool = False
 
 
 class BreakthroughKeywordSelectionRequest(BaseModel):
@@ -112,6 +131,15 @@ class CustomSourceRequest(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     keyword: str = Field(default="", max_length=120)
     type: str = Field(default="", max_length=80)
+    brief_focus: str = Field(default="", max_length=1000)
+    channel: str = Field(default="", max_length=120)
+    channels: list[str] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class CustomSourceBatchRequest(BaseModel):
+    titles: list[str] = Field(default_factory=list)
+    type: str = Field(min_length=1, max_length=80)
     brief_focus: str = Field(default="", max_length=1000)
     channel: str = Field(default="", max_length=120)
     channels: list[str] = Field(default_factory=list)

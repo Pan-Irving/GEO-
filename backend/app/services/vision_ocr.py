@@ -1,51 +1,106 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
+from typing import Any, Callable
 
+from PIL import Image, ImageOps, UnidentifiedImageError
 import pypdfium2 as pdfium
 from openai import OpenAI
 
 from app.core.config import Settings
 
 
-IMAGE_MIME_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-}
-
-
 class VisionOcr:
     def __init__(self, settings: Settings):
         if not settings.openai_api_key:
             raise RuntimeError("缺少 OPENAI_API_KEY，无法执行图片 OCR。")
-        kwargs: dict[str, str] = {"api_key": settings.openai_api_key}
+        kwargs: dict[str, Any] = {"api_key": settings.openai_api_key, "timeout": settings.vision_ocr_timeout_seconds}
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url.rstrip("/")
         self.client = OpenAI(**kwargs)
         self.model = settings.openai_vision_model or settings.openai_model
         self.max_pages = max(settings.vision_ocr_max_pages, 1)
+        self.max_edge = max(settings.image_ocr_max_edge, 512)
+        self.jpeg_quality = min(max(settings.image_ocr_jpeg_quality, 40), 95)
+        self.concurrency = max(settings.ocr_concurrency, 1)
 
     def extract_image(self, path: Path) -> str:
-        return self._extract_image_bytes(path.read_bytes(), mime_type=IMAGE_MIME_TYPES.get(path.suffix.lower(), "image/jpeg"), label=path.name)
+        data = self._compress_image_bytes(path.read_bytes())
+        return self._extract_image_bytes(data, mime_type="image/jpeg", label=path.name)
 
     def extract_pdf(self, path: Path) -> str:
         document = pdfium.PdfDocument(str(path))
         page_count = min(len(document), self.max_pages)
         sections = [f"## {path.name}", f"扫描版 PDF OCR：共处理 {page_count}/{len(document)} 页。"]
+        results = self.extract_pdf_pages(path, list(range(page_count)))
         for page_index in range(page_count):
-            page = document[page_index]
-            bitmap = page.render(scale=2).to_pil()
-            buffer = BytesIO()
-            bitmap.convert("RGB").save(buffer, format="JPEG", quality=86)
-            sections.append(
-                f"### 第 {page_index + 1} 页 OCR\n\n"
-                + self._extract_image_bytes(buffer.getvalue(), mime_type="image/jpeg", label=f"{path.name} 第 {page_index + 1} 页")
-            )
+            sections.append(f"### 第 {page_index + 1} 页 OCR\n\n{results.get(page_index, '（该页 OCR 未返回内容。）')}")
         if len(document) > page_count:
             sections.append(f"（为控制成本，剩余 {len(document) - page_count} 页未 OCR。可调高 VISION_OCR_MAX_PAGES 后重新解析。）")
         return "\n\n".join(sections)
+
+    def extract_pdf_pages(
+        self,
+        path: Path,
+        page_indexes: list[int],
+        progress: Callable[[str], None] | None = None,
+    ) -> dict[int, str]:
+        document = pdfium.PdfDocument(str(path))
+        valid_indexes = [index for index in page_indexes[: self.max_pages] if 0 <= index < len(document)]
+        if not valid_indexes:
+            return {}
+
+        rendered_pages: list[tuple[int, bytes]] = []
+        for position, page_index in enumerate(valid_indexes, start=1):
+            if progress:
+                progress(f"正在渲染 PDF 第 {page_index + 1} 页（{position}/{len(valid_indexes)}）")
+            page = document[page_index]
+            bitmap = page.render(scale=2).to_pil()
+            rendered_pages.append((page_index, self._pil_to_jpeg_bytes(bitmap)))
+
+        results: dict[int, str] = {}
+        max_workers = min(self.concurrency, len(rendered_pages))
+        def run_page_ocr(page_index: int, data: bytes) -> str:
+            if progress:
+                progress(f"正在 OCR PDF 第 {page_index + 1} 页（共 {len(rendered_pages)} 页）")
+            return self._extract_image_bytes(data, mime_type="image/jpeg", label=f"{path.name} 第 {page_index + 1} 页")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(run_page_ocr, page_index, data): page_index
+                for page_index, data in rendered_pages
+            }
+            completed = 0
+            for future in as_completed(futures):
+                page_index = futures[future]
+                results[page_index] = future.result()
+                completed += 1
+                if progress:
+                    progress(f"正在 OCR PDF：已完成 {completed}/{len(rendered_pages)} 页")
+        return results
+
+    def _compress_image_bytes(self, data: bytes) -> bytes:
+        try:
+            image = Image.open(BytesIO(data))
+        except UnidentifiedImageError as exc:
+            raise ValueError("图片文件无法识别，请确认文件未损坏。") from exc
+        return self._pil_to_jpeg_bytes(image)
+
+    def _pil_to_jpeg_bytes(self, image: Image.Image) -> bytes:
+        image = ImageOps.exif_transpose(image)
+        if image.mode in {"RGBA", "LA", "P"}:
+            background = Image.new("RGB", image.size, (255, 255, 255))
+            if image.mode == "P":
+                image = image.convert("RGBA")
+            background.paste(image, mask=image.getchannel("A") if "A" in image.getbands() else None)
+            image = background
+        else:
+            image = image.convert("RGB")
+        image.thumbnail((self.max_edge, self.max_edge))
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=self.jpeg_quality, optimize=True)
+        return buffer.getvalue()
 
     def _extract_image_bytes(self, data: bytes, *, mime_type: str, label: str) -> str:
         encoded = base64.b64encode(data).decode("ascii")

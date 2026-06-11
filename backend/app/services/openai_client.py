@@ -16,6 +16,7 @@ class OpenAIWorkflowClient:
             kwargs["base_url"] = settings.openai_base_url.rstrip("/")
         self.client = OpenAI(**kwargs)
         self.api_mode = settings.openai_api_mode.lower().strip()
+        self.stream = bool(settings.openai_stream)
 
     def generate_json(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
         if self.api_mode == "chat":
@@ -47,25 +48,45 @@ class OpenAIWorkflowClient:
         return self.generate_json(system=system, user=user, schema_name=schema_name)
 
     def _generate_json_with_chat(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    system
+                    + "\n\n你必须只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。"
+                ),
+            },
+            {"role": "user", "content": user},
+        ]
+        if self.stream:
+            text = self._generate_chat_text_stream(messages=messages)
+        else:
+            text = self._generate_chat_text(messages=messages)
+        return parse_json_or_raw(text, schema_name)
+
+    def _generate_chat_text(self, *, messages: list[dict[str, str]]) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        system
-                        + "\n\n你必须只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。"
-                    ),
-                },
-                {"role": "user", "content": user},
-            ],
+            messages=messages,
             response_format={"type": "json_object"},
         )
-        text = response.choices[0].message.content or "{}"
-        try:
-            return json.loads(strip_json_fence(text))
-        except json.JSONDecodeError:
-            return {"title": schema_name, "markdown": text, "raw": text}
+        return response.choices[0].message.content or "{}"
+
+    def _generate_chat_text_stream(self, *, messages: list[dict[str, str]]) -> str:
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            stream=True,
+        )
+        chunks: list[str] = []
+        for event in stream:
+            for choice in getattr(event, "choices", []) or []:
+                delta = getattr(choice, "delta", None)
+                content = getattr(delta, "content", None)
+                if content:
+                    chunks.append(str(content))
+        return "".join(chunks) or "{}"
 
 
 def extract_output_text(response: Any) -> str:
@@ -79,6 +100,13 @@ def extract_output_text(response: Any) -> str:
             if text:
                 chunks.append(text)
     return "\n".join(chunks).strip()
+
+
+def parse_json_or_raw(text: str, schema_name: str) -> dict[str, Any]:
+    try:
+        return json.loads(strip_json_fence(text))
+    except json.JSONDecodeError:
+        return {"title": schema_name, "markdown": text, "raw": text}
 
 
 def json_object_schema(name: str) -> dict[str, Any]:

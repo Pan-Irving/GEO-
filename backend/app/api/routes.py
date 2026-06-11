@@ -5,10 +5,13 @@ from app.agent.skill_loader import SkillLoader
 from app.agent.workflow import AgentWorkflow, WorkflowError
 from app.core.config import Settings, get_settings
 from app.models.schemas import (
+    ApplyMatrixImportRequest,
     BreakthroughKeywordSelectionRequest,
     ConfirmStepRequest,
+    CustomSourceBatchRequest,
     CustomSourceRequest,
     HealthResponse,
+    ParseMaterialsRequest,
     ProjectCreate,
     RunStepRequest,
     UpdateItemRequest,
@@ -57,6 +60,17 @@ def get_project(project_id: str, repository: ProjectRepository = Depends(get_rep
     return load_or_404(repository, project_id)
 
 
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: str, repository: ProjectRepository = Depends(get_repository)):
+    try:
+        repository.delete_project(project_id)
+        return {"deleted": True, "project_id": project_id}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/projects/{project_id}/materials")
 async def upload_materials(
     project_id: str,
@@ -75,16 +89,30 @@ async def upload_materials(
 def parse_materials(
     project_id: str,
     background_tasks: BackgroundTasks,
+    payload: ParseMaterialsRequest | None = None,
     workflow: AgentWorkflow = Depends(get_workflow),
 ):
     try:
-        job_id = workflow.start_materials_parse(project_id)
-        background_tasks.add_task(workflow.parse_materials, project_id, job_id)
+        options = payload or ParseMaterialsRequest()
+        job_id = workflow.start_materials_parse(project_id, mode=options.mode, force=options.force)
+        background_tasks.add_task(workflow.parse_materials, project_id, job_id, options.mode, options.force)
         return {"job_id": job_id, "project": workflow.repository.load_project(project_id)}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WorkflowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/projects/{project_id}/materials/{material_id}")
+def delete_material(
+    project_id: str,
+    material_id: str,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    try:
+        return {"project": repository.delete_material(project_id, material_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/run/{step}")
@@ -99,6 +127,53 @@ def run_step(
         job_id = workflow.start_step(project_id, step, payload.payload)
         background_tasks.add_task(workflow.run_step_job, project_id, job_id, step, payload.payload)
         return {"job_id": job_id, "project": workflow.repository.load_project(project_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/matrix/import-plan")
+async def import_matrix_plan(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    workflow: AgentWorkflow = Depends(get_workflow),
+):
+    try:
+        content = await file.read()
+        result = workflow.start_matrix_import(project_id, file.filename or "content-plan.pdf", file.content_type, content)
+        background_tasks.add_task(workflow.run_matrix_import_job, project_id, result["job_id"], result["draft_id"])
+        return {**result, "project": workflow.repository.load_project(project_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/matrix/import-plan/{draft_id}")
+def get_matrix_import_plan(
+    project_id: str,
+    draft_id: str,
+    workflow: AgentWorkflow = Depends(get_workflow),
+):
+    try:
+        workflow.repository.load_project(project_id)
+        return workflow.repository.load_matrix_import_draft(project_id, draft_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/matrix/import-plan/{draft_id}/apply")
+def apply_matrix_import_plan(
+    project_id: str,
+    draft_id: str,
+    payload: ApplyMatrixImportRequest,
+    workflow: AgentWorkflow = Depends(get_workflow),
+):
+    try:
+        workflow.apply_matrix_import_draft(project_id, draft_id, payload.overwrite)
+        return {"project": workflow.repository.load_project(project_id), "draft": workflow.repository.load_matrix_import_draft(project_id, draft_id)}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WorkflowError as exc:
@@ -142,6 +217,20 @@ def create_custom_source(
 ):
     try:
         return {"project": repository.create_custom_source(project_id, payload.model_dump())}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/custom-sources/batch")
+def create_custom_sources(
+    project_id: str,
+    payload: CustomSourceBatchRequest,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    try:
+        return {"project": repository.create_custom_sources(project_id, payload.model_dump())}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -195,6 +284,14 @@ def update_step_item(
 @router.get("/projects/{project_id}/jobs")
 def get_jobs(project_id: str, repository: ProjectRepository = Depends(get_repository)):
     return load_or_404(repository, project_id).jobs
+
+
+@router.post("/projects/{project_id}/jobs/{job_id}/cancel")
+def cancel_job(project_id: str, job_id: str, repository: ProjectRepository = Depends(get_repository)):
+    try:
+        return {"project": repository.cancel_job(project_id, job_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/logs")

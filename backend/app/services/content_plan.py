@@ -25,6 +25,23 @@ class ContentPlanError(ValueError):
 CONTENT_PLAN_SCHEMA_VERSION = "1.0"
 PDF_FONT = "STSong-Light"
 ARTICLE_TYPE_ORDER = ["支柱标准文", "榜单推荐文", "横评对比文", "场景选购文", "产品证据文", "FAQ问答文"]
+BLOCKED_ARTICLE_TYPE_MARKERS = [
+    "品牌认知文",
+    "行业趋势文",
+    "服务方案解析文",
+    "用户案例文",
+    "实测体验文",
+    "风险避坑文",
+    "误区纠正文",
+    "标准/认证解读文",
+    "标准认证解读文",
+    "认证解读文",
+    "价格预算决策文",
+    "价格预算文",
+    "预算决策文",
+    "组合方案文",
+    "套系搭配文",
+]
 PDF_TABLE_STYLE = TableStyle(
     [
         ("FONTNAME", (0, 0), (-1, -1), PDF_FONT),
@@ -57,21 +74,33 @@ def build_matrix_content_plan(project: Project) -> dict[str, Any]:
         for index, row in enumerate(raw_items, start=1)
         if isinstance(row, dict)
     ]
-    items = [item for item in items if item["title"] or item["keyword"] or item["type"]]
+    items = [
+        item
+        for item in items
+        if content_plan_article_type_allowed(item["type"]) and (item["title"] or item["keyword"] or item["type"])
+    ]
     if not items:
         raise ContentPlanError("内容矩阵缺少可导出的文章规划 items。")
 
     project_block = record(matrix_output.get("project"))
     intent_groups = normalize_intent_groups(matrix_output.get("intent_groups"))
-    article_type_pool = normalize_article_type_pool(matrix_output.get("article_type_pool"), items)
+    intent_group_names = intent_group_name_lookup(intent_groups)
+    items = [resolve_item_intent_group(item, intent_group_names) for item in items]
+    article_type_pool = normalize_article_type_pool(matrix_output.get("article_type_pool"), items, intent_group_names)
     sorted_items = sorted(items, key=content_plan_item_sort_key(intent_groups))
     keywords = unique_strings(
         [item["keyword"] for item in sorted_items]
         + [keyword for group in intent_groups for keyword in group.get("keywords", [])]
     )
-    article_types = unique_strings([item["type"] for item in sorted_items])
+    article_types = [article_type for article_type in ARTICLE_TYPE_ORDER if any(item["type"] == article_type for item in sorted_items)]
     evidence_gaps = normalize_text_rows(matrix_output.get("evidence_gaps"))
-    schedule_rows = normalize_text_rows(matrix_output.get("schedule"))
+    shared_supporting_articles = filter_content_plan_rows_by_type(normalize_text_rows(matrix_output.get("shared_supporting_articles")), "type")
+    publishing_plan = filter_content_plan_rows_by_type(normalize_text_rows(matrix_output.get("publishing_plan")), "article_type")
+    schedule_rows = filter_content_plan_schedule_rows(normalize_text_rows(matrix_output.get("schedule")))
+    final_execution_advice = text_value(matrix_output.get("final_execution_advice"))
+    if content_plan_text_mentions_blocked_type(final_execution_advice):
+        final_execution_advice = ""
+    warnings = filter_content_plan_rows_without_blocked_text(normalize_text_rows(matrix_output.get("warnings")))
 
     plan = {
         "schema_version": CONTENT_PLAN_SCHEMA_VERSION,
@@ -98,14 +127,14 @@ def build_matrix_content_plan(project: Project) -> dict[str, Any]:
         "keyword_intent_groups": intent_groups,
         "article_type_pool": article_type_pool,
         "first_round_plans": sorted_items,
-        "shared_supporting_articles": normalize_text_rows(matrix_output.get("shared_supporting_articles")),
+        "shared_supporting_articles": shared_supporting_articles,
         "unified_recommendation_language": normalize_text_rows(matrix_output.get("unified_recommendation_language")),
         "evidence_gaps": evidence_gaps,
-        "publishing_plan": normalize_text_rows(matrix_output.get("publishing_plan")),
+        "publishing_plan": publishing_plan,
         "schedule": schedule_rows,
         "brief_requirements": normalize_text_rows(matrix_output.get("brief_requirements")),
-        "final_execution_advice": text_value(matrix_output.get("final_execution_advice")),
-        "warnings": normalize_text_rows(matrix_output.get("warnings")),
+        "final_execution_advice": final_execution_advice,
+        "warnings": warnings,
     }
     plan["display_sections"] = build_display_sections(plan)
     return plan
@@ -502,6 +531,7 @@ def display_rows(value: Any) -> list[dict[str, Any]]:
 def normalize_intent_groups(value: Any) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
     for index, row in enumerate(list_records(value), start=1):
+        article_types = filter_content_plan_article_types(value_list(first_by_keys(row, ["main_article_types", "article_types", "recommended_article_types", "文章类型", "常见主攻文章类型"])))
         group = {
             "id": text_value(first_by_keys(row, ["id", "name", "intent_group", "意图簇"])) or f"intent-{index}",
             "name": text_value(first_by_keys(row, ["name", "intent_group", "group", "意图簇", "关键词意图簇"])) or f"意图簇 {index}",
@@ -509,35 +539,80 @@ def normalize_intent_groups(value: Any) -> list[dict[str, Any]]:
             "user_question": text_value(first_by_keys(row, ["user_question", "user_real_question", "ai_question", "AI需要回答的问题", "用户真正想问什么"])),
             "user_stage": text_value(first_by_keys(row, ["user_stage", "stage", "用户阶段"])),
             "recommendation_logic": text_value(first_by_keys(row, ["recommendation_logic", "target_recommendation_logic", "推荐逻辑", "目标推荐逻辑"]))
-            or "、".join(value_list(first_by_keys(row, ["main_article_types", "article_types", "recommended_article_types", "文章类型", "常见主攻文章类型"]))),
-            "article_types": value_list(first_by_keys(row, ["main_article_types", "article_types", "recommended_article_types", "文章类型", "常见主攻文章类型"])),
+            or "、".join(article_types),
+            "article_types": article_types,
             "raw": row,
         }
         groups.append(group)
     return groups
 
 
-def normalize_article_type_pool(value: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def intent_group_name_lookup(intent_groups: list[dict[str, Any]]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for group in intent_groups:
+        group_id = text_value(group.get("id"))
+        group_name = text_value(group.get("name"))
+        if not group_name:
+            continue
+        if group_id:
+            lookup[group_id] = group_name
+        lookup[group_name] = group_name
+    return lookup
+
+
+def resolve_intent_group_labels(values: Any, lookup: dict[str, str]) -> list[str]:
+    resolved: list[str] = []
+    for value in value_list(values):
+        label = resolve_intent_group_label(value, lookup)
+        if label not in resolved:
+            resolved.append(label)
+    return resolved
+
+
+def resolve_intent_group_label(value: str, lookup: dict[str, str]) -> str:
+    if value in lookup:
+        return lookup[value]
+    parts = value.split(maxsplit=1)
+    if parts and parts[0] in lookup:
+        return lookup[parts[0]]
+    return value
+
+
+def resolve_item_intent_group(item: dict[str, Any], lookup: dict[str, str]) -> dict[str, Any]:
+    current = text_value(item.get("intent_group"))
+    if not current:
+        return item
+    resolved = resolve_intent_group_label(current, lookup)
+    if resolved == current:
+        return item
+    return {**item, "intent_group_raw": current, "intent_group": resolved}
+
+
+def normalize_article_type_pool(value: Any, items: list[dict[str, Any]], intent_group_lookup: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    intent_group_lookup = intent_group_lookup or {}
     rows = list_records(value)
+    by_type: dict[str, dict[str, Any]] = {}
     if rows:
-        normalized = []
         for row in rows:
             article_type = text_value(first_by_keys(row, ["type", "article_type", "文章类型", "板块"]))
-            normalized.append(
-                {
-                    "type": article_type,
-                    "role": text_value(first_by_keys(row, ["role", "core_role", "reason", "usage", "核心作用", "主要作用", "规划理由", "使用方式"])),
-                    "keywords": value_list(first_by_keys(row, ["keywords", "applicable_keywords", "covered_keywords_or_intent_groups", "适用关键词", "覆盖关键词", "覆盖意图簇"])),
-                    "recommendation_strength": text_value(first_by_keys(row, ["recommendation_strength", "推荐强度"])),
-                    "count": len([item for item in items if item["type"] == article_type]) if article_type else "",
-                    "raw": row,
-                }
-            )
-        return sorted(normalized, key=lambda row: article_type_rank(row["type"]))
+            if not content_plan_article_type_allowed(article_type):
+                continue
+            keywords = first_by_keys(row, ["keywords", "applicable_keywords", "covered_keywords_or_intent_groups", "适用关键词", "覆盖关键词", "覆盖意图簇"])
+            by_type[article_type] = {
+                "type": article_type,
+                "role": text_value(first_by_keys(row, ["role", "core_role", "reason", "usage", "核心作用", "主要作用", "规划理由", "使用方式"])),
+                "keywords": resolve_intent_group_labels(keywords, intent_group_lookup),
+                "recommendation_strength": text_value(first_by_keys(row, ["recommendation_strength", "推荐强度"])),
+                "count": len([item for item in items if item["type"] == article_type]),
+                "raw": row,
+            }
+        return [row for article_type in ARTICLE_TYPE_ORDER if (row := by_type.get(article_type))]
 
     generated: list[dict[str, Any]] = []
-    for article_type in unique_strings([item["type"] for item in items]):
+    for article_type in ARTICLE_TYPE_ORDER:
         type_items = [item for item in items if item["type"] == article_type]
+        if not type_items:
+            continue
         generated.append(
             {
                 "type": article_type,
@@ -582,6 +657,50 @@ def article_type_rank(value: str) -> int:
     if value in ARTICLE_TYPE_ORDER:
         return ARTICLE_TYPE_ORDER.index(value)
     return len(ARTICLE_TYPE_ORDER)
+
+
+def content_plan_article_type_allowed(value: str) -> bool:
+    return value in ARTICLE_TYPE_ORDER
+
+
+def filter_content_plan_article_types(values: list[str]) -> list[str]:
+    return [article_type for article_type in ARTICLE_TYPE_ORDER if article_type in values]
+
+
+def filter_content_plan_rows_by_type(rows: list[Any], key: str) -> list[Any]:
+    filtered: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        article_type = text_value(first_by_keys(row, [key, "type", "article_type", "文章类型"]))
+        if content_plan_article_type_allowed(article_type):
+            filtered.append(row)
+    return filtered
+
+
+def filter_content_plan_schedule_rows(rows: list[Any]) -> list[Any]:
+    filtered: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        article_types = filter_content_plan_article_types(value_list(first_by_keys(row, ["article_types", "文章类型"])))
+        if not article_types:
+            continue
+        key_tasks = [
+            task
+            for task in value_list(first_by_keys(row, ["key_tasks", "tasks", "task", "关键任务", "任务"]))
+            if not content_plan_text_mentions_blocked_type(task)
+        ]
+        filtered.append({**row, "article_types": article_types, "key_tasks": key_tasks})
+    return filtered
+
+
+def filter_content_plan_rows_without_blocked_text(rows: list[Any]) -> list[Any]:
+    return [row for row in rows if not content_plan_text_mentions_blocked_type(text_value(row))]
+
+
+def content_plan_text_mentions_blocked_type(value: str) -> bool:
+    return any(marker in value for marker in BLOCKED_ARTICLE_TYPE_MARKERS)
 
 
 def normalize_text_rows(value: Any) -> list[Any]:

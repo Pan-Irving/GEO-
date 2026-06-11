@@ -1,4 +1,4 @@
-import type { ContentPlan, CustomSourcePayload, Project, WorkflowStep } from "./types";
+import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, ParseMode, Project, WorkflowStep } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -59,18 +59,40 @@ export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
   createProject: (name: string) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),
+  deleteProject: (projectId: string) =>
+    request<{ deleted: boolean; project_id: string }>(`/api/projects/${projectId}`, { method: "DELETE" }),
   getProject: (projectId: string) => request<Project>(`/api/projects/${projectId}`),
   uploadMaterials: (projectId: string, files: FileList) => {
     const form = new FormData();
     Array.from(files).forEach(file => form.append("files", file));
     return request<{ materials: unknown[] }>(`/api/projects/${projectId}/materials`, { method: "POST", body: form });
   },
-  parseMaterials: (projectId: string) =>
-    request<{ job_id?: string; project: Project }>(`/api/projects/${projectId}/materials/parse`, { method: "POST" }),
+  parseMaterials: (projectId: string, payload: { mode?: ParseMode; force?: boolean } = {}) =>
+    request<{ job_id?: string; project: Project }>(`/api/projects/${projectId}/materials/parse`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  deleteMaterial: (projectId: string, materialId: string) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/materials/${encodeURIComponent(materialId)}`, { method: "DELETE" }),
   runStep: (projectId: string, step: WorkflowStep, payload: Record<string, unknown>) =>
     request<{ job_id: string; project: Project }>(`/api/projects/${projectId}/run/${step}`, {
       method: "POST",
       body: JSON.stringify({ payload })
+    }),
+  importMatrixPlan: (projectId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<{ job_id: string; draft_id: string; project: Project }>(`/api/projects/${projectId}/matrix/import-plan`, {
+      method: "POST",
+      body: form
+    });
+  },
+  getMatrixImportPlan: (projectId: string, draftId: string) =>
+    request<MatrixImportDraft>(`/api/projects/${projectId}/matrix/import-plan/${encodeURIComponent(draftId)}`),
+  applyMatrixImportPlan: (projectId: string, draftId: string) =>
+    request<{ project: Project; draft: MatrixImportDraft }>(`/api/projects/${projectId}/matrix/import-plan/${encodeURIComponent(draftId)}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ overwrite: true })
     }),
   confirmStep: (projectId: string, step: WorkflowStep, notes?: string) =>
     request<{ project: Project }>(`/api/projects/${projectId}/confirm/${step}`, {
@@ -84,6 +106,11 @@ export const api = {
     }),
   createCustomSource: (projectId: string, payload: CustomSourcePayload) =>
     request<{ project: Project }>(`/api/projects/${projectId}/custom-sources`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  createCustomSources: (projectId: string, payload: CustomSourceBatchPayload) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/custom-sources/batch`, {
       method: "POST",
       body: JSON.stringify(payload)
     }),
@@ -102,6 +129,8 @@ export const api = {
       body: JSON.stringify({ payload })
     }),
   getLogs: (projectId: string) => request<{ logs: string }>(`/api/projects/${projectId}/logs`),
+  cancelJob: (projectId: string, jobId: string) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: "POST" }),
   getOutputs: (projectId: string) => request<{ files: string[] }>(`/api/projects/${projectId}/outputs`),
   getContentPlan: (projectId: string) => request<ContentPlan>(`/api/projects/${projectId}/content-plan`),
   exportContentPlanPdf: (projectId: string) => requestBlob(`/api/projects/${projectId}/export/content-plan.pdf`)

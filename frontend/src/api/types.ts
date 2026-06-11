@@ -8,6 +8,7 @@ export type WorkflowStep =
   | "archive";
 
 export type StepStatus = "pending" | "running" | "completed" | "confirmed" | "failed";
+export type ParseMode = "smart" | "text_only" | "full_ocr";
 
 export interface StepState {
   status: StepStatus;
@@ -24,15 +25,22 @@ export interface Material {
   stored_name: string;
   content_type?: string | null;
   size: number;
+  sha256?: string | null;
   parsed_path?: string | null;
   status: "uploaded" | "parsed" | "failed";
   error?: string | null;
+  parse_mode?: ParseMode | null;
+  parser_version?: string | null;
+  parse_source?: "fresh" | "cache" | "skipped_existing" | null;
+  parsed_chars?: number;
+  ocr_pages?: number;
+  parsed_at?: string | null;
 }
 
 export interface Job {
   id: string;
   step: WorkflowStep;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
   error?: string | null;
   total_count: number;
   completed_count: number;
@@ -65,6 +73,15 @@ export interface CustomSourcePayload {
   title: string;
   keyword?: string;
   type?: string;
+  brief_focus?: string;
+  channel?: string;
+  channels?: string[];
+  raw?: Record<string, unknown>;
+}
+
+export interface CustomSourceBatchPayload {
+  titles: string[];
+  type: string;
   brief_focus?: string;
   channel?: string;
   channels?: string[];
@@ -110,4 +127,23 @@ export interface ContentPlan {
       }>;
     }>;
   }>;
+}
+
+export interface MatrixImportDraft {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "applied";
+  filename: string;
+  stored_name: string;
+  content_type?: string | null;
+  size: number;
+  source_path: string;
+  created_at: string;
+  updated_at: string;
+  job_id?: string | null;
+  parsed_chars?: number;
+  stats?: Record<string, unknown>;
+  warnings?: unknown[];
+  output?: Record<string, unknown>;
+  error?: string | null;
+  applied_at?: string | null;
 }

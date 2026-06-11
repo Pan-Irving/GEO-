@@ -8,5 +8,6 @@ pypdf==6.4.1
 pypdfium2==5.9.0
 Pillow==11.1.0
 reportlab==4.2.5
+rapidocr-onnxruntime==1.2.3
 pytest==8.3.4
 httpx==0.28.1

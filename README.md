@@ -71,9 +71,15 @@ OPENAI_API_KEY=你的中转站API_KEY
 OPENAI_BASE_URL=https://你的中转站地址/v1
 OPENAI_MODEL=gpt-5.5
 OPENAI_API_MODE=chat
-OPENAI_VISION_MODEL=
-ENABLE_VISION_OCR=true
-VISION_OCR_MAX_PAGES=8
+ENABLE_LOCAL_OCR=true
+LOCAL_OCR_ENGINE=rapidocr
+LOCAL_OCR_MAX_PAGES=4
+LOCAL_OCR_MIN_CONFIDENCE=0.35
+ENABLE_VISION_OCR=false
+OCR_CONCURRENCY=2
+IMAGE_OCR_MAX_EDGE=1600
+IMAGE_OCR_JPEG_QUALITY=82
+BATCH_GENERATION_CONCURRENCY=3
 APP_DATA_DIR=app-data
 FRONTEND_ORIGIN=http://localhost:5173
 ```
@@ -84,12 +90,18 @@ FRONTEND_ORIGIN=http://localhost:5173
 - `OPENAI_BASE_URL`：中转站地址，必须以 `/v1` 结尾。
 - `OPENAI_MODEL`：正文、矩阵、Brief 等主要生成模型。
 - `OPENAI_API_MODE=chat`：适配只支持 `/v1/chat/completions` 的中转站。
-- `OPENAI_VISION_MODEL`：图片 OCR 模型。如果不填，默认使用 `OPENAI_MODEL`。
-- `ENABLE_VISION_OCR=true`：开启图片和扫描 PDF 的 OCR。
-- `VISION_OCR_MAX_PAGES=8`：扫描 PDF 最多 OCR 页数，避免一次消耗过高。
+- `ENABLE_LOCAL_OCR=true`：开启本地 OCR，图片和扫描 PDF 不调用 GPT。
+- `LOCAL_OCR_ENGINE=rapidocr`：本地 OCR 引擎，使用 RapidOCR + ONNXRuntime，支持 Windows/macOS。
+- `LOCAL_OCR_MAX_PAGES=4`：智能快速模式下扫描 PDF 最多 OCR 页数。
+- `LOCAL_OCR_MIN_CONFIDENCE=0.35`：低于该置信度的 OCR 文本会被过滤。
+- `ENABLE_VISION_OCR=false`：默认关闭 GPT 视觉 OCR。
+- `OCR_CONCURRENCY=2`：保留给 OCR 并发控制，建议保持 1-3。
+- `IMAGE_OCR_MAX_EDGE=1600`：图片 OCR 前自动压缩的最大边长。
+- `IMAGE_OCR_JPEG_QUALITY=82`：图片 OCR 前转 JPEG 的质量。
+- `BATCH_GENERATION_CONCURRENCY=3`：Brief 和正文批量生成的并发数，建议保持 1-8。
 - `APP_DATA_DIR=app-data`：项目数据保存目录。
 
-如果中转站不支持图片理解，图片和扫描版 PDF 可能无法自动 OCR，需要补充文字版资料。
+图片和扫描版 PDF 默认使用本地 OCR，不依赖中转站图片理解能力。
 
 ## 4. 安装依赖
 
@@ -233,8 +245,8 @@ md, txt, json, csv, xlsx, pdf, jpg, jpeg, png, webp
 
 - 文字资料优先使用 `md`、`txt`、`xlsx`、`csv`。
 - PDF 如果是可复制文字的 PDF，系统会直接抽取文字。
-- 扫描版 PDF 会尝试转图片 OCR。
-- 图片资料会尝试使用视觉模型 OCR。
+- 扫描版 PDF 会尝试转图片并使用本地 OCR。
+- 图片资料会尝试使用本地 OCR，不调用 GPT 视觉模型。
 - 如果图片或 PDF OCR 不稳定，请补充一份文字版说明。
 
 ### 第三步：解析资料
@@ -517,11 +529,11 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 检查：
 
-- `ENABLE_VISION_OCR=true`。
-- 中转站是否支持视觉模型。
-- `OPENAI_VISION_MODEL` 是否填写了支持图片理解的模型。
+- `ENABLE_LOCAL_OCR=true`。
+- `LOCAL_OCR_ENGINE=rapidocr`。
+- 是否已执行 `pip install -r backend/requirements.txt` 安装 `rapidocr-onnxruntime`。
 
-如果中转站不支持图片，请把图片中的内容整理成文字资料后上传。
+如果本地 OCR 仍无法识别，请把图片中的内容整理成文字资料后上传。
 
 ### 8.5 点击生成后结果为空
 
