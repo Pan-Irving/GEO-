@@ -2,6 +2,11 @@
 
 这份包用于部署到另一台电脑本地运行。请不要把自己的 `.env` API Key 放进压缩包里；新电脑上按 `.env.example` 重新创建 `.env`。
 
+Windows 用户可以优先看根目录的 `WINDOWS_DEPLOY.md`。压缩包内提供了：
+
+- `scripts/install-windows.ps1`：首次安装依赖。
+- `scripts/start-all-windows.ps1`：同时启动后端和前端。
+
 ## 1. 解压后准备
 
 确认新电脑已安装：
@@ -31,6 +36,10 @@ OPENAI_API_KEY=你的中转站API_KEY
 OPENAI_BASE_URL=https://你的中转站地址/v1
 OPENAI_MODEL=gpt-5.5
 OPENAI_API_MODE=chat
+PLANNING_API_KEY=你的DeepSeek_API_KEY
+PLANNING_BASE_URL=https://api.deepseek.com
+PLANNING_MODEL=deepseek-v4-pro
+PLANNING_API_MODE=chat
 ENABLE_LOCAL_OCR=true
 LOCAL_OCR_ENGINE=rapidocr
 LOCAL_OCR_MAX_PAGES=4

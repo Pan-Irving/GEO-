@@ -55,7 +55,7 @@ async function requestBlob(url: string, init?: RequestInit): Promise<Blob> {
 }
 
 export const api = {
-  health: () => request<{ status: string; model: string; skill_available: boolean }>("/api/agent/health"),
+  health: () => request<{ status: string; model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean }>("/api/agent/health"),
   listProjects: () => request<Project[]>("/api/projects"),
   createProject: (name: string) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),

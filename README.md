@@ -71,6 +71,10 @@ OPENAI_API_KEY=你的中转站API_KEY
 OPENAI_BASE_URL=https://你的中转站地址/v1
 OPENAI_MODEL=gpt-5.5
 OPENAI_API_MODE=chat
+PLANNING_API_KEY=你的DeepSeek_API_KEY
+PLANNING_BASE_URL=https://api.deepseek.com
+PLANNING_MODEL=deepseek-v4-pro
+PLANNING_API_MODE=chat
 ENABLE_LOCAL_OCR=true
 LOCAL_OCR_ENGINE=rapidocr
 LOCAL_OCR_MAX_PAGES=4
@@ -86,10 +90,14 @@ FRONTEND_ORIGIN=http://localhost:5173
 
 说明：
 
-- `OPENAI_API_KEY`：中转站提供的 API Key。
-- `OPENAI_BASE_URL`：中转站地址，必须以 `/v1` 结尾。
-- `OPENAI_MODEL`：正文、矩阵、Brief 等主要生成模型。
+- `OPENAI_API_KEY`：写作模型 API Key，主要用于 Brief 和正文生成。
+- `OPENAI_BASE_URL`：写作模型地址；如果使用中转站，通常以 `/v1` 结尾。
+- `OPENAI_MODEL`：Brief、正文等写作步骤使用的模型。
 - `OPENAI_API_MODE=chat`：适配只支持 `/v1/chat/completions` 的中转站。
+- `PLANNING_API_KEY`：规划模型 API Key，建议填写 DeepSeek 官方 Key；为空时规划步骤回退使用 `OPENAI_*`。
+- `PLANNING_BASE_URL=https://api.deepseek.com`：规划模型地址。
+- `PLANNING_MODEL=deepseek-v4-pro`：intake、内容矩阵、逐词击破和外部矩阵 PDF 识别使用的规划模型。
+- `PLANNING_API_MODE=chat`：DeepSeek 官方 OpenAI 兼容接口使用 `chat`。
 - `ENABLE_LOCAL_OCR=true`：开启本地 OCR，图片和扫描 PDF 不调用 GPT。
 - `LOCAL_OCR_ENGINE=rapidocr`：本地 OCR 引擎，使用 RapidOCR + ONNXRuntime，支持 Windows/macOS。
 - `LOCAL_OCR_MAX_PAGES=4`：智能快速模式下扫描 PDF 最多 OCR 页数。

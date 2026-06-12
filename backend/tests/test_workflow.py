@@ -8,7 +8,7 @@ from reportlab.pdfgen import canvas
 
 from app.agent.skill_loader import SkillLoader
 from app.agent.process_runner import ChildProcessCancelled
-from app.agent.workflow import AgentWorkflow, WorkflowError, build_local_matrix_skeleton, build_selection_prompt_blocks, drop_running_items_after_cancel, mark_article_brief_failed, mark_article_briefs_running, mark_brief_source_failed, mark_brief_sources_running, material_summary_for_step, merge_generated_articles, merge_generated_briefs, normalize_matrix_import_output, normalize_planning_output, planning_output_requirements, prior_outputs_for_step, result_to_markdown
+from app.agent.workflow import AgentWorkflow, WorkflowError, build_local_matrix_skeleton, build_matrix_batches, build_selection_prompt_blocks, client_profile_for_step, drop_running_items_after_cancel, mark_article_brief_failed, mark_article_briefs_running, mark_brief_source_failed, mark_brief_sources_running, material_summary_for_step, merge_generated_articles, merge_generated_briefs, normalize_llm_matrix_intent_groups, normalize_matrix_import_output, normalize_planning_output, planning_output_requirements, prior_outputs_for_step, result_to_markdown
 from app.core.config import PROJECT_ROOT, Settings
 from app.services.content_plan import ContentPlanError, build_matrix_content_plan, export_content_plan_pdf
 from app.storage.repository import ProjectRepository
@@ -761,12 +761,13 @@ def test_planning_step_jobs_record_success_and_failure(tmp_path: Path, monkeypat
 
 
 def test_matrix_batched_generation_merges_canonical_output(tmp_path: Path, monkeypatch):
-    workflow = make_workflow(tmp_path, matrix_batch_intent_group_size=1)
+    workflow = make_workflow(tmp_path, matrix_batch_keyword_size=1)
     project = workflow.repository.create_project("测试项目")
     workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
     workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("A推荐", "B怎么选"))
     job_id = workflow.start_step(project.id, "matrix", {})
     modes: list[object] = []
+    monkeypatch.setattr(workflow, "_build_llm_matrix_skeleton", lambda project, skeleton, payload: skeleton)
 
     def fake_run_step(project_id: str, step: str, payload: dict[str, object]):
         mode = payload.get("matrix_generation_mode")
@@ -802,6 +803,7 @@ def test_matrix_batched_generation_retries_524_once(tmp_path: Path, monkeypatch)
     workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("A推荐"))
     job_id = workflow.start_step(project.id, "matrix", {})
     calls = {"batch": 0}
+    monkeypatch.setattr(workflow, "_build_llm_matrix_skeleton", lambda project, skeleton, payload: skeleton)
 
     def fake_run_step(project_id: str, step: str, payload: dict[str, object]):
         assert payload.get("matrix_generation_mode") == "batch"
@@ -827,6 +829,7 @@ def test_matrix_batched_generation_stores_friendly_524_error(tmp_path: Path, mon
     workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
     workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("A推荐"))
     job_id = workflow.start_step(project.id, "matrix", {})
+    monkeypatch.setattr(workflow, "_build_llm_matrix_skeleton", lambda project, skeleton, payload: skeleton)
 
     def fake_run_step(project_id: str, step: str, payload: dict[str, object]):
         assert payload.get("matrix_generation_mode") == "batch"
@@ -867,7 +870,64 @@ def test_local_matrix_skeleton_uses_intake_keywords(tmp_path: Path):
     assert set(skeleton) >= {"project", "keyword_overview", "intent_groups", "article_type_pool", "items", "brief_requirements", "warnings"}
 
 
-def test_matrix_batch_material_context_is_trimmed_to_batch_keywords(tmp_path: Path):
+def test_llm_matrix_intent_groups_cover_and_deduplicate_keywords():
+    result = {
+        "intent_groups": [
+            {"name": "场景配置类", "keywords": ["别墅厨房厨电配置", "开放式厨房高端厨电推荐"], "user_question": "场景怎么配"},
+            {"name": "品牌推荐类", "keywords": ["国内高端厨电品牌排名"], "user_question": "品牌怎么选"},
+        ]
+    }
+
+    groups = normalize_llm_matrix_intent_groups(
+        result,
+        ["别墅厨房厨电配置", "开放式厨房高端厨电推荐", "国内高端厨电品牌排名"],
+    )
+
+    assert [group["name"] for group in groups] == ["场景配置类", "品牌推荐类"]
+    assert [keyword for group in groups for keyword in group["keywords"]] == ["别墅厨房厨电配置", "开放式厨房高端厨电推荐", "国内高端厨电品牌排名"]
+
+
+def test_matrix_llm_grouping_failure_falls_back_to_local_skeleton(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("高端厨电品牌推荐", "别墅中西厨厨电搭配"))
+    saved = workflow.repository.load_project(project.id)
+    skeleton = build_local_matrix_skeleton(saved, {})
+    monkeypatch.setattr(workflow, "_run_matrix_intent_grouping", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    result = workflow._build_llm_matrix_skeleton(saved, skeleton, {})
+
+    assert {group["name"] for group in result["intent_groups"]} == {"推荐决策类", "场景选购类"}
+    assert any("回退本地规则" in warning for warning in result["warnings"])
+
+
+def test_matrix_batches_split_by_keyword_count_not_group_count(tmp_path: Path):
+    workflow = make_workflow(tmp_path, matrix_batch_keyword_size=4)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("A", "B", "C", "D", "E", "F"))
+    saved = workflow.repository.load_project(project.id)
+    skeleton = build_local_matrix_skeleton(saved, {})
+    skeleton["intent_groups"] = [
+        {
+            "id": "large",
+            "name": "大意图簇",
+            "keywords": ["A", "B", "C", "D", "E", "F"],
+            "user_question": "用户问题",
+            "user_stage": "认知研究阶段",
+            "recommendation_logic": "推荐逻辑",
+            "article_types": MATRIX_ARTICLE_TYPES,
+        }
+    ]
+
+    batches = build_matrix_batches(saved, skeleton, {}, workflow.settings)
+
+    assert [batch["keywords"] for batch in batches] == [["A", "B", "C", "D"], ["E", "F"]]
+    assert [batch["intent_groups"][0]["name"] for batch in batches] == ["大意图簇", "大意图簇"]
+
+
+def test_matrix_material_context_uses_intake_lightweight_notice(tmp_path: Path):
     workflow = make_workflow(tmp_path, matrix_batch_material_context_limit=2200)
     project = workflow.repository.create_project("测试项目")
     long_prefix = "通用资料" * 400
@@ -883,8 +943,20 @@ def test_matrix_batch_material_context_is_trimmed_to_batch_keywords(tmp_path: Pa
         workflow.settings,
     )
 
-    assert len(text) <= 2200
-    assert "B怎么选 专属证据" in text
+    assert "内容矩阵阶段采用轻量规划模式" in text
+    assert "B怎么选 专属证据" not in text
+    assert "通用资料" not in text
+
+
+def test_brief_and_article_material_context_still_use_material_summary(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    summary = "# 资料证据\nB怎么选 专属证据\n"
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True, output={"summary": summary})
+    saved = workflow.repository.load_project(project.id)
+
+    assert "B怎么选 专属证据" in material_summary_for_step(saved, "brief", {}, workflow.settings)
+    assert "B怎么选 专属证据" in material_summary_for_step(saved, "article", {}, workflow.settings)
 
 
 def test_intake_prompt_includes_canonical_template():
@@ -894,6 +966,14 @@ def test_intake_prompt_includes_canonical_template():
     assert "project_intake_table 必须固定输出 13 行" in prompt
     assert "id, field, value, source, confidence, status, question_for_user" in prompt
     assert "不要把字段名翻译成中文" in prompt
+
+
+def test_client_profile_for_step_routes_planning_and_writing_steps():
+    assert client_profile_for_step("intake") == "planning"
+    assert client_profile_for_step("matrix") == "planning"
+    assert client_profile_for_step("breakthrough") == "planning"
+    assert client_profile_for_step("brief") == "default"
+    assert client_profile_for_step("article") == "default"
 
 
 def test_intake_output_is_normalized_from_legacy_fields():
@@ -1903,6 +1983,120 @@ def test_parallel_brief_generation_merges_out_of_order_results(tmp_path: Path, m
     assert list(workflow.repository.outputs_dir(project.id).rglob("briefs/source-c-brief.md"))
 
 
+def test_brief_generation_unwraps_json_string_markdown(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    payload = {
+        "selected_sources": [
+            {"source_id": "source-a", "source_step": "matrix", "keyword": "A", "type": "类型", "title": "标题 A"},
+        ]
+    }
+    job_id = workflow.start_step(project.id, "brief", payload)
+
+    nested = json.dumps(
+        {
+            "items": [
+                {
+                    "source_id": "source-a",
+                    "title": "标题 A",
+                    "markdown": "# 真正的 Brief\n\n正文内容",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    monkeypatch.setattr(workflow, "_run_step", lambda *args, **kwargs: {"title": "geo_brief", "markdown": nested})
+
+    workflow.run_step_job(project.id, job_id, "brief", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    item = saved.steps["brief"].output["items"][0]
+    assert item["status"] == "completed"
+    assert item["markdown"].startswith("# 真正的 Brief")
+    assert '"items"' not in item["markdown"]
+
+
+def test_brief_generation_accepts_content_field(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    payload = {
+        "selected_sources": [
+            {"source_id": "source-a", "source_step": "matrix", "keyword": "A", "type": "类型", "title": "标题 A"},
+        ]
+    }
+    job_id = workflow.start_step(project.id, "brief", payload)
+
+    monkeypatch.setattr(workflow, "_run_step", lambda *args, **kwargs: {"items": [{"source_id": "source-a", "content": "# content 字段 Brief"}]})
+
+    workflow.run_step_job(project.id, job_id, "brief", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    item = saved.steps["brief"].output["items"][0]
+    assert item["status"] == "completed"
+    assert item["markdown"] == "# content 字段 Brief"
+
+
+def test_run_step_brief_wraps_plain_markdown(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    calls: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, settings, profile="default"):
+            self.profile = profile
+
+        def generate_text(self, *, system: str, user: str) -> str:
+            calls.append({"system": system, "user": user})
+            return "```markdown\n# 标题 A Brief\n\n正文内容\n```"
+
+        def generate_json(self, *args, **kwargs):
+            raise AssertionError("brief should not use JSON generation")
+
+    monkeypatch.setattr("app.agent.workflow.OpenAIWorkflowClient", FakeClient)
+
+    result = workflow._run_step(
+        project.id,
+        "brief",
+        {
+            "selected_sources": [
+                {"source_id": "source-a", "source_step": "matrix", "keyword": "A", "type": "类型", "title": "标题 A"},
+            ]
+        },
+    )
+
+    item = result["items"][0]
+    assert item["source_id"] == "source-a"
+    assert item["title"] == "标题 A"
+    assert item["status"] == "completed"
+    assert item["markdown"] == "# 标题 A Brief\n\n正文内容"
+    assert "不要输出 JSON" in calls[0]["user"]
+
+
+def test_failed_brief_generation_keeps_raw_generation(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    payload = {
+        "selected_sources": [
+            {"source_id": "source-a", "source_step": "matrix", "keyword": "A", "type": "类型", "title": "标题 A"},
+        ]
+    }
+    job_id = workflow.start_step(project.id, "brief", payload)
+
+    raw = {"items": [{"source_id": "source-a", "title": "标题 A", "markdown": ""}], "debug": "empty markdown"}
+    monkeypatch.setattr(workflow, "_run_step", lambda *args, **kwargs: raw)
+
+    workflow.run_step_job(project.id, job_id, "brief", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    item = saved.steps["brief"].output["items"][0]
+    assert item["status"] == "failed"
+    assert item["raw_generation"]["debug"] == "empty markdown"
+
+
 def test_batch_generation_concurrency_one_runs_all_items(tmp_path: Path, monkeypatch):
     workflow = make_workflow(tmp_path, batch_generation_concurrency=1)
     project = workflow.repository.create_project("测试项目")
@@ -1970,6 +2164,18 @@ def test_article_rejects_unfinished_selected_brief(tmp_path: Path):
             project.id,
             "article",
             {"selected_briefs": [{"id": "brief-a", "source_id": "source-a", "status": "running"}]},
+        )
+
+
+def test_article_rejects_completed_brief_without_markdown(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+
+    with pytest.raises(WorkflowError, match="尚未生成完成"):
+        workflow.start_step(
+            project.id,
+            "article",
+            {"selected_briefs": [{"id": "brief-a", "source_id": "source-a", "status": "completed", "markdown": ""}]},
         )
 
 
@@ -2042,6 +2248,90 @@ def test_parallel_article_generation_merges_all_items_and_writes_files(tmp_path:
     assert list(workflow.repository.outputs_dir(project.id).rglob("articles/brief-a.md"))
     assert list(workflow.repository.outputs_dir(project.id).rglob("articles/brief-b.md"))
     assert list(workflow.repository.outputs_dir(project.id).rglob("articles/brief-c.md"))
+
+
+def test_article_generation_unwraps_json_string_markdown(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    workflow.repository.update_step(project.id, "brief", status="completed", confirmed=True, output={"items": []})
+    payload = {
+        "selected_briefs": [
+            {"id": "brief-a", "source_id": "source-a", "keyword": "A", "type": "类型", "title": "标题 A", "markdown": "# Brief A", "status": "completed"},
+        ]
+    }
+    job_id = workflow.start_step(project.id, "article", payload)
+
+    nested = json.dumps(
+        {
+            "items": [
+                {
+                    "brief_id": "brief-a",
+                    "title": "标题 A",
+                    "markdown": "# 真正的正文\n\n正文内容",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    monkeypatch.setattr(workflow, "_run_step", lambda *args, **kwargs: {"title": "geo_article", "markdown": nested})
+
+    workflow.run_step_job(project.id, job_id, "article", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    item = saved.steps["article"].output["items"][0]
+    assert item["status"] == "completed"
+    assert item["markdown"].startswith("# 真正的正文")
+    assert '"items"' not in item["markdown"]
+
+
+def test_run_step_article_wraps_plain_markdown(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    workflow.repository.update_step(project.id, "brief", status="completed", confirmed=True, output={"items": []})
+    calls: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, settings, profile="default"):
+            self.profile = profile
+
+        def generate_text(self, *, system: str, user: str) -> str:
+            calls.append({"system": system, "user": user})
+            return "# 正式正文\n\n正文内容"
+
+        def generate_json(self, *args, **kwargs):
+            raise AssertionError("article should not use JSON generation")
+
+    monkeypatch.setattr("app.agent.workflow.OpenAIWorkflowClient", FakeClient)
+
+    result = workflow._run_step(
+        project.id,
+        "article",
+        {
+            "selected_briefs": [
+                {
+                    "id": "brief-a",
+                    "source_id": "source-a",
+                    "keyword": "A",
+                    "type": "类型",
+                    "title": "标题 A",
+                    "markdown": "# Brief A",
+                    "status": "completed",
+                    "revision": 2,
+                },
+            ]
+        },
+    )
+
+    item = result["items"][0]
+    assert item["brief_id"] == "brief-a"
+    assert item["brief_revision"] == 2
+    assert item["source_id"] == "source-a"
+    assert item["status"] == "completed"
+    assert item["article_audit_status"] == ""
+    assert item["markdown"] == "# 正式正文\n\n正文内容"
+    assert "不要输出 JSON" in calls[0]["user"]
 
 
 def test_article_existing_same_brief_revision_is_rejected(tmp_path: Path):

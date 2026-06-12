@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     openai_api_mode: str = "chat"
     openai_stream: bool = True
     openai_timeout_seconds: float = 600
+    planning_api_key: str = ""
+    planning_base_url: str = ""
+    planning_model: str = ""
+    planning_api_mode: str = ""
+    planning_stream: bool | None = None
+    planning_timeout_seconds: float = 0
     openai_vision_model: str = ""
     enable_vision_ocr: bool = False
     vision_ocr_timeout_seconds: float = 90

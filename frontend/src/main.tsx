@@ -232,7 +232,7 @@ function App() {
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null);
   const [projectName, setProjectName] = useState("GEO 内容项目");
-  const [health, setHealth] = useState<{ model: string; skill_available: boolean } | null>(null);
+  const [health, setHealth] = useState<{ model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean } | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const selectedProjectIdRef = useRef("");
@@ -491,7 +491,7 @@ function App() {
     <div className="app prototype">
       <aside className="sidebar">
         <div className="brand">
-          <img className="sidebar-logo" src="/blank-logo.svg" alt="" />
+          <img className="sidebar-logo" src="/mindsun-logo.png" alt="思阳集团" />
           <strong className="brand-title">GEO 撰文工作台</strong>
           <span className="brand-subtitle">资料分析 → 规划 → Brief → 正文</span>
         </div>
@@ -548,7 +548,7 @@ function App() {
           </div>
           <div className="actions">
             {busy && <span className="pill"><Loader2 className="spin" size={14} />运行中</span>}
-            {health && <span className="pill">{health.model} / Skill {health.skill_available ? "已识别" : "缺失"}</span>}
+            {health && <span className="pill">规划 {health.planning_model || health.model} / 写作 {health.writing_model || health.model} / Skill {health.skill_available ? "已识别" : "缺失"}</span>}
             <button className="btn" onClick={() => void manualRefresh()}><RefreshCw size={15} />刷新状态</button>
           </div>
         </section>
@@ -2484,13 +2484,17 @@ function BriefView(props: {
   const filteredItems = filterBriefItems(items, articleByBriefId, activeFilters);
   const selectedVisibleBriefItems = filteredItems.filter(item => selectedBriefs.has(item.id));
   const allBriefsSelected = filteredItems.length > 0 && filteredItems.every(item => selectedBriefs.has(item.id));
-  const pendingArticleBriefs = selectedVisibleBriefItems.filter(brief => !articles.some(article => articleCurrentForBrief(article, brief)));
+  const invalidSelectedBriefCount = selectedVisibleBriefItems.filter(brief => !briefIsGenerated(brief)).length;
+  const generatedSelectedBriefItems = selectedVisibleBriefItems.filter(briefIsGenerated);
+  const pendingArticleBriefs = generatedSelectedBriefItems.filter(brief => !articles.some(article => articleCurrentForBrief(article, brief)));
   const pendingUpdateCount = pendingArticleBriefs.filter(brief => {
     const article = articleByBriefId.get(brief.id);
     return article && !articleCurrentForBrief(article, brief);
   }).length;
   const articleButtonText = selectedVisibleBriefItems.length === 0
     ? "生成选中正文"
+    : invalidSelectedBriefCount && pendingArticleBriefs.length === 0
+      ? "选中 Brief 尚未生成完成"
     : pendingArticleBriefs.length === 0
       ? "选中 Brief 均已有正文"
       : pendingUpdateCount
@@ -2747,6 +2751,7 @@ function ArticleView(props: {
         <div className="article-list">
           {filteredItems.map(item => {
             const boundBrief = briefById.get(item.briefId || "");
+            const boundBriefReady = briefIsGenerated(boundBrief);
             return (
               <article className={`article-collapse ${articleReviewCardClass(item, boundBrief)}`} key={item.id}>
                 <div className="article-card-head">
@@ -2758,11 +2763,13 @@ function ArticleView(props: {
                     <div className="chips meta-chips review-meta-chips">
                       <Chip text={item.keyword} type="brand" className="keyword-chip" />
                       <Chip text={item.type} className="type-chip" />
-                      {boundBrief && (
+                      {boundBriefReady && boundBrief ? (
                         <button type="button" className="chip good state-chip chip-button" onClick={() => openBriefDetail(boundBrief)}>
                           <span>已绑定 Brief</span>
                         </button>
-                      )}
+                      ) : boundBrief ? (
+                        <Chip text="Brief 未完成" type="warn" className="state-chip" />
+                      ) : null}
                       <ItemStatusChip status={item.status} className="state-chip" />
                     </div>
                   </div>
@@ -2773,7 +2780,7 @@ function ArticleView(props: {
                     {articleAuditApproved(item) ? (
                       <button className="btn" disabled><CheckCircle2 size={15} />已审核</button>
                     ) : (
-                      <button className="btn" disabled={item.status === "running" || !item.markdown} onClick={() => openAudit(item)}><CheckCircle2 size={15} />进入审核</button>
+                      <button className="btn" disabled={item.status === "running" || !item.markdown || !boundBriefReady} onClick={() => openAudit(item)}><CheckCircle2 size={15} />进入审核</button>
                     )}
                   </div>
                 </div>
@@ -3087,7 +3094,8 @@ function PlanBriefStatusChip({ status }: { status?: string }) {
 
 function briefIsGenerated(brief?: ContentItem): boolean {
   if (!brief) return false;
-  return !["failed", "running", "queued", "pending"].includes(brief.status);
+  if (["failed", "running", "queued", "pending"].includes(brief.status)) return false;
+  return Boolean((brief.markdown || "").trim());
 }
 
 function Status({ status }: { status: string }) {
@@ -3834,7 +3842,7 @@ function normalizeItems(output: AnyRecord, step: string): ContentItem[] {
       modifiedAt: readString(row, ["modified_at", "modifiedAt"], ""),
       briefRevision: readNumber(row, ["brief_revision", "briefRevision"], 1),
       staleReason: readString(row, ["stale_reason", "staleReason"], ""),
-      raw: row
+      raw: isRecord(row.raw_generation) ? row.raw_generation : row
     };
     return applyItemOverride(item, overrides);
   });

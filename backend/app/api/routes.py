@@ -42,7 +42,14 @@ def get_workflow(
 
 @router.get("/agent/health", response_model=HealthResponse)
 def health(settings: Settings = Depends(get_settings), skill_loader: SkillLoader = Depends(get_skill_loader)) -> HealthResponse:
-    return HealthResponse(status="ok", model=settings.openai_model, skill_available=skill_loader.available())
+    planning_model = settings.planning_model or settings.openai_model
+    return HealthResponse(
+        status="ok",
+        model=settings.openai_model,
+        writing_model=settings.openai_model,
+        planning_model=planning_model,
+        skill_available=skill_loader.available(),
+    )
 
 
 @router.post("/projects")

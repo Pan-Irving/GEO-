@@ -7,16 +7,19 @@ from app.core.config import Settings
 
 
 class OpenAIWorkflowClient:
-    def __init__(self, settings: Settings):
-        if not settings.openai_api_key:
-            raise RuntimeError("缺少 OPENAI_API_KEY，请在 .env 中配置后重试。")
-        self.model = settings.openai_model
-        kwargs: dict[str, Any] = {"api_key": settings.openai_api_key, "timeout": settings.openai_timeout_seconds}
-        if settings.openai_base_url:
-            kwargs["base_url"] = settings.openai_base_url.rstrip("/")
+    def __init__(self, settings: Settings, profile: str = "default"):
+        config = workflow_client_config(settings, profile)
+        if not config["api_key"]:
+            env_name = "PLANNING_API_KEY" if profile == "planning" else "OPENAI_API_KEY"
+            raise RuntimeError(f"缺少 {env_name}，请在 .env 中配置后重试。")
+        self.profile = profile
+        self.model = str(config["model"])
+        kwargs: dict[str, Any] = {"api_key": config["api_key"], "timeout": config["timeout"]}
+        if config["base_url"]:
+            kwargs["base_url"] = str(config["base_url"]).rstrip("/")
         self.client = OpenAI(**kwargs)
-        self.api_mode = settings.openai_api_mode.lower().strip()
-        self.stream = bool(settings.openai_stream)
+        self.api_mode = str(config["api_mode"]).lower().strip()
+        self.stream = bool(config["stream"])
 
     def generate_json(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
         if self.api_mode == "chat":
@@ -44,8 +47,28 @@ class OpenAIWorkflowClient:
         except json.JSONDecodeError:
             return {"title": schema_name, "markdown": text, "raw": text}
 
+    def generate_text(self, *, system: str, user: str) -> str:
+        if self.api_mode == "chat":
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
+            if self.stream:
+                return self._generate_chat_text_stream(messages=messages, response_format=None)
+            return self._generate_chat_text(messages=messages, response_format=None)
+        if self.api_mode != "responses":
+            raise RuntimeError("OPENAI_API_MODE 只支持 chat 或 responses。")
+        response = self.client.responses.create(
+            model=self.model,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        return extract_output_text(response).strip()
+
     def generate_markdown(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
-        return self.generate_json(system=system, user=user, schema_name=schema_name)
+        return {"title": schema_name, "markdown": self.generate_text(system=system, user=user)}
 
     def _generate_json_with_chat(self, *, system: str, user: str, schema_name: str) -> dict[str, Any]:
         messages = [
@@ -58,27 +81,32 @@ class OpenAIWorkflowClient:
             },
             {"role": "user", "content": user},
         ]
+        response_format = {"type": "json_object"}
         if self.stream:
-            text = self._generate_chat_text_stream(messages=messages)
+            text = self._generate_chat_text_stream(messages=messages, response_format=response_format)
         else:
-            text = self._generate_chat_text(messages=messages)
+            text = self._generate_chat_text(messages=messages, response_format=response_format)
         return parse_json_or_raw(text, schema_name)
 
-    def _generate_chat_text(self, *, messages: list[dict[str, str]]) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_format={"type": "json_object"},
-        )
+    def _generate_chat_text(self, *, messages: list[dict[str, str]], response_format: dict[str, Any] | None) -> str:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or "{}"
 
-    def _generate_chat_text_stream(self, *, messages: list[dict[str, str]]) -> str:
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            stream=True,
-        )
+    def _generate_chat_text_stream(self, *, messages: list[dict[str, str]], response_format: dict[str, Any] | None) -> str:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        stream = self.client.chat.completions.create(**kwargs)
         chunks: list[str] = []
         for event in stream:
             for choice in getattr(event, "choices", []) or []:
@@ -130,3 +158,23 @@ def strip_json_fence(text: str) -> str:
         value = value.removeprefix("```json").removeprefix("```").strip()
         value = value.removesuffix("```").strip()
     return value
+
+
+def workflow_client_config(settings: Settings, profile: str = "default") -> dict[str, Any]:
+    if profile == "planning" and settings.planning_api_key:
+        return {
+            "api_key": settings.planning_api_key,
+            "base_url": settings.planning_base_url or settings.openai_base_url,
+            "model": settings.planning_model or settings.openai_model,
+            "api_mode": settings.planning_api_mode or settings.openai_api_mode,
+            "stream": settings.openai_stream if settings.planning_stream is None else settings.planning_stream,
+            "timeout": settings.planning_timeout_seconds or settings.openai_timeout_seconds,
+        }
+    return {
+        "api_key": settings.openai_api_key,
+        "base_url": settings.openai_base_url,
+        "model": settings.openai_model,
+        "api_mode": settings.openai_api_mode,
+        "stream": settings.openai_stream,
+        "timeout": settings.openai_timeout_seconds,
+    }

@@ -33,6 +33,24 @@ STEP_LABELS: dict[WorkflowStep, str] = {
     "brief": "单篇文章 Brief",
     "article": "正式正文",
 }
+MARKDOWN_VALUE_KEYS = (
+    "markdown",
+    "full_markdown",
+    "brief_markdown",
+    "article_markdown",
+    "content_markdown",
+    "body_markdown",
+    "body",
+    "content",
+    "text",
+    "output_text",
+    "answer",
+    "正文",
+    "完整正文",
+    "brief",
+    "完整Brief",
+    "Brief",
+)
 
 
 INTAKE_SCHEMA_VERSION = "1.0"
@@ -81,6 +99,12 @@ PLANNING_SCHEMA_VERSION = "1.0"
 PLANNING_STEPS = {"matrix", "breakthrough"}
 MATERIAL_CONTEXT_LIMIT = 50000
 MATERIAL_PARSER_VERSION = "materials-parser-v3-local-ocr"
+MATRIX_LIGHTWEIGHT_MATERIAL_NOTICE = (
+    "内容矩阵阶段采用轻量规划模式：本步骤不注入原始资料全文或资料解析摘要，"
+    "只基于已确认的项目信息抽取表（intake）、本地关键词意图簇骨架和 Skill 规则生成内容规划。"
+    "核心证据只能来自 intake 的 core_evidence 摘要；不得新增 intake 中没有出现的证书、排名、参数、案例或认证。"
+    "具体资料证据的核验、展开和引用将在 Brief 与正文阶段读取项目资料完成。"
+)
 PARSE_MODE_LABELS: dict[str, str] = {
     "smart": "智能快速",
     "text_only": "仅文本",
@@ -826,7 +850,7 @@ class AgentWorkflow:
         )
 
     def _recognize_matrix_import_text(self, text: str) -> dict[str, Any]:
-        client = OpenAIWorkflowClient(self.settings)
+        client = OpenAIWorkflowClient(self.settings, profile="planning")
         system = (
             "你是内容规划 PDF 的结构化识别器。你只能把用户已提供的规划内容转换成固定 JSON，"
             "不得新增文章、不得重新策划、不得虚构证据。"
@@ -1003,6 +1027,17 @@ class AgentWorkflow:
         try:
             project = self.repository.load_project(project_id)
             skeleton = build_local_matrix_skeleton(project, payload)
+            self.repository.update_job(
+                project_id,
+                job_id,
+                status="running",
+                total_count=total_count,
+                completed_count=completed_count,
+                failed_count=0,
+                current_item=None,
+                message="正在基于 intake 规划关键词意图簇",
+            )
+            skeleton = self._build_llm_matrix_skeleton(project, skeleton, payload)
             batches = build_matrix_batches(project, skeleton, payload, self.settings)
             if not batches:
                 raise WorkflowError("内容矩阵无法拆分批次：未找到可用于生成规划的关键词或意图簇。")
@@ -1016,7 +1051,7 @@ class AgentWorkflow:
                 completed_count=completed_count,
                 failed_count=0,
                 current_item=None,
-                message=f"已本地拆分关键词意图簇，准备分 {len(batches)} 批生成内容规划",
+                message=f"已完成关键词意图簇规划，准备分 {len(batches)} 批生成内容规划",
             )
 
             partials: list[dict[str, Any]] = []
@@ -1086,6 +1121,59 @@ class AgentWorkflow:
                 error=friendly_error,
             )
             self.repository.log(project_id, f"步骤失败：{STEP_LABELS.get(step, step)} - {exc}")
+
+    def _build_llm_matrix_skeleton(self, project: Any, skeleton: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        keywords = matrix_seed_keywords(project, skeleton, payload)
+        if not keywords:
+            return skeleton
+        try:
+            result = self._run_matrix_intent_grouping(project, skeleton, keywords)
+            groups = normalize_llm_matrix_intent_groups(result, keywords)
+            if not groups:
+                return skeleton
+            return rebuild_matrix_skeleton_with_intent_groups(skeleton, groups)
+        except Exception as exc:  # noqa: BLE001 - grouping is quality enhancement, not a hard dependency
+            next_skeleton = dict(skeleton)
+            next_skeleton["warnings"] = unique_texts(
+                [
+                    *normalize_string_list(skeleton.get("warnings")),
+                    f"DeepSeek 关键词意图簇规划失败，已回退本地规则：{friendly_job_error(exc)}",
+                ]
+            )
+            return next_skeleton
+
+    def _run_matrix_intent_grouping(self, project: Any, skeleton: dict[str, Any], keywords: list[str]) -> dict[str, Any]:
+        client = OpenAIWorkflowClient(self.settings, profile="planning")
+        intake = project.steps["intake"].output if "intake" in project.steps else {}
+        system = (
+            "你是一个 GEO 内容策略规划助手。你只做关键词意图簇规划，不生成文章，不读取原始资料。"
+            "必须只输出 JSON 对象。"
+        )
+        template = {
+            "intent_groups": [
+                {
+                    "id": "intent-1",
+                    "name": "中文意图簇名称",
+                    "keywords": [],
+                    "user_question": "用户真实问题",
+                    "user_stage": "认知研究阶段/比较评估阶段/方案选择阶段/购买决策阶段",
+                    "recommendation_logic": "该意图簇下应如何建立推荐理由",
+                    "article_types": MATRIX_REQUIRED_ARTICLE_TYPES,
+                }
+            ],
+            "warnings": [],
+        }
+        user = "\n\n".join(
+            [
+                "# 任务\n基于 intake 中的项目定位和目标关键词，重新规划关键词意图簇。",
+                "# 约束\n所有 target_keywords 必须出现且只能出现一次；不要新增关键词；不要删除关键词；一个意图簇可以包含多个关键词，不强制限制为 5 个；意图簇名称必须是中文，且要体现用户意图而不是机械分类。",
+                "# 项目信息 intake\n" + json.dumps(intake, ensure_ascii=False, indent=2)[:30000],
+                "# 目标关键词\n" + json.dumps(keywords, ensure_ascii=False, indent=2),
+                "# 当前本地兜底意图簇\n" + json.dumps(skeleton.get("intent_groups", []), ensure_ascii=False, indent=2),
+                "# 输出模板\n" + json.dumps(template, ensure_ascii=False, indent=2),
+            ]
+        )
+        return client.generate_json(system=system, user=user, schema_name="geo_matrix_intent_groups")
 
     def _finish_matrix_step_success(
         self,
@@ -1220,7 +1308,7 @@ class AgentWorkflow:
                     "index": index,
                     "selected": selected,
                     "title": item_title,
-                    "error": str(exc),
+                    "error": friendly_job_error(exc),
                 }
 
         cancelled = self._job_cancel_requested(project_id, job_id)
@@ -1235,15 +1323,26 @@ class AgentWorkflow:
             if item_result["ok"]:
                 result = item_result["result"]
                 project = self.repository.load_project(project_id)
-                if step == "brief":
-                    merged, generated_items = merge_generated_briefs(project.steps["brief"].output, [selected], result)
-                    self._write_generated_items(project, "brief", generated_items)
-                else:
-                    merged, generated_items = merge_generated_articles(project.steps["article"].output, [selected], result)
-                    self._write_generated_items(project, "article", generated_items)
-                self.repository.update_step(project_id, step, status="running", output=merged, error=None)
-                completed_count += 1
-                self.repository.log(project_id, f"单篇生成完成：{item_title}")
+                try:
+                    if step == "brief":
+                        merged, generated_items = merge_generated_briefs(project.steps["brief"].output, [selected], result)
+                        self._write_generated_items(project, "brief", generated_items)
+                    else:
+                        merged, generated_items = merge_generated_articles(project.steps["article"].output, [selected], result)
+                        self._write_generated_items(project, "article", generated_items)
+                    self.repository.update_step(project_id, step, status="running", output=merged, error=None)
+                    completed_count += 1
+                    self.repository.log(project_id, f"单篇生成完成：{item_title}")
+                except Exception as exc:  # noqa: BLE001 - malformed item should fail only this item
+                    error = str(exc)
+                    if step == "brief":
+                        output = mark_brief_source_failed(project.steps["brief"].output, selected, error)
+                    else:
+                        output = mark_article_brief_failed(project.steps["article"].output, selected, error)
+                    output = attach_raw_generation_to_failed_item(output, selected, result, step)
+                    self.repository.update_step(project_id, step, status="running", output=output, error=None)
+                    failed_count += 1
+                    self.repository.log(project_id, f"单篇生成失败：{item_title} - {error}")
             else:
                 project = self.repository.load_project(project_id)
                 error = str(item_result["error"])
@@ -1564,7 +1663,7 @@ class AgentWorkflow:
         self.repository.log(project_id, f"保存项目信息修改：{item_id}")
 
     def _run_step(self, project_id: str, step: WorkflowStep, payload: dict[str, Any]) -> dict[str, Any]:
-        client = OpenAIWorkflowClient(self.settings)
+        client = OpenAIWorkflowClient(self.settings, profile=client_profile_for_step(step))
         rules = self.skill_loader.load_for_step(step)
         project = self.repository.load_project(project_id)
         material_summary = material_summary_for_step(project, step, payload, self.settings)
@@ -1583,15 +1682,23 @@ class AgentWorkflow:
         user_parts.extend(selection_blocks)
         if planning_requirements := planning_output_requirements(step, payload):
             user_parts.append(planning_requirements)
+        if step in {"brief", "article"}:
+            user_parts.extend(
+                [
+                    "# 本次人工输入\n" + json.dumps(payload, ensure_ascii=False, indent=2),
+                    markdown_output_requirements(step),
+                ]
+            )
+            user = "\n\n".join(user_parts)
+            markdown = client.generate_text(system=system, user=user).strip()
+            return wrap_markdown_generation(step, payload, markdown)
         user_parts.extend(
             [
                 "# 本次人工输入\n" + json.dumps(payload, ensure_ascii=False, indent=2),
-                "# 输出要求\n请输出 JSON。brief/article 批量步骤必须输出 items 数组；正文类步骤必须把可发布 Markdown 放在 markdown 字段。",
+                "# 输出要求\n请输出 JSON 对象，不要输出 Markdown 代码围栏或解释文字。",
             ]
         )
         user = "\n\n".join(user_parts)
-        if step == "article":
-            return client.generate_markdown(system=system, user=user, schema_name=f"geo_{step}")
         return client.generate_json(system=system, user=user, schema_name=f"geo_{step}")
 
     def _write_generated_items(self, project, step: WorkflowStep, items: list[dict[str, Any]]) -> None:
@@ -1660,8 +1767,9 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
                 f"{' / '.join(MATRIX_REQUIRED_ARTICLE_TYPES)}。"
                 "不得新增第七类文章类型；支柱标准文章、FAQ问答短文等别名必须归一为固定类型。\n"
                 "当前批次不要求覆盖全部六类，但最终合并后必须覆盖六类；如果某类适合本批关键词，应在本批输出。\n"
-                "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → 目标对象证据 → 用户价值 → 推荐结论”。\n"
-                "如果资料不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据、认证、排名、报告、专家、销量或案例。\n"
+                "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → intake核心证据摘要 → 用户价值 → 推荐结论”。\n"
+                "required_evidence / evidence_chain / brief_focus 写成 Brief 阶段需要核验和展开的证据要求，不要假装已经读完原始资料全文。\n"
+                "如果 intake 核心证据不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据、认证、排名、报告、专家、销量或案例。\n"
                 f"# matrix_batch\n{json.dumps(batch, ensure_ascii=False, indent=2)}\n"
                 f"```json\n{json.dumps(MATRIX_OUTPUT_TEMPLATE, ensure_ascii=False, indent=2)}\n```"
             )
@@ -1678,9 +1786,10 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
             "不得新增第七类文章类型；支柱标准文章、FAQ问答短文等别名必须归一为固定类型。\n"
             "items 中每一项都必须包含这些 key："
             f"{', '.join(PLANNING_ITEM_KEYS)}。\n"
-            "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → 目标对象证据 → 用户价值 → 推荐结论”。\n"
+            "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → intake核心证据摘要 → 用户价值 → 推荐结论”。\n"
+            "required_evidence / evidence_chain / brief_focus 写成 Brief 阶段需要核验和展开的证据要求，不要假装已经读完原始资料全文。\n"
             "每个 item 都要写 recommendation_strength；榜单、横评、产品证据、FAQ 应形成明确优先推荐，支柱标准文不得硬广。\n"
-            "如果资料不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据、认证、排名、报告、专家、销量或案例。\n"
+            "如果 intake 核心证据不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据、认证、排名、报告、专家、销量或案例。\n"
             "除 items 外，各区块也必须使用固定英文 key："
             f"intent_groups={MATRIX_INTENT_GROUP_KEYS}；"
             f"article_type_pool={MATRIX_ARTICLE_TYPE_POOL_KEYS}；"
@@ -1733,6 +1842,12 @@ def normalize_planning_output(step: WorkflowStep, result: dict[str, Any], payloa
     if step == "breakthrough":
         return normalize_breakthrough_output(result, payload)
     return result
+
+
+def client_profile_for_step(step: WorkflowStep) -> str:
+    if step in {"intake", "matrix", "breakthrough"}:
+        return "planning"
+    return "default"
 
 
 def prior_outputs_for_step(project: Any, step: WorkflowStep) -> dict[str, Any]:
@@ -2432,6 +2547,119 @@ def local_matrix_intent_groups(keywords: list[str]) -> list[dict[str, Any]]:
     return result
 
 
+def normalize_llm_matrix_intent_groups(result: dict[str, Any], expected_keywords: list[str]) -> list[dict[str, Any]]:
+    rows = planning_array_by_keys(result, ["intent_groups", "keyword_intent_groups", "groups", "items", "关键词意图分组"])
+    if not rows:
+        raise WorkflowError("DeepSeek 未返回 intent_groups。")
+    expected = unique_texts(expected_keywords)
+    remaining = list(expected)
+    seen: set[str] = set()
+    groups: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        raw_keywords = normalize_string_list(first_non_empty_value(row, ["keywords", "target_keywords", "关键词", "覆盖关键词"]))
+        matched_keywords: list[str] = []
+        for keyword in expected:
+            if keyword in seen:
+                continue
+            if keyword in raw_keywords:
+                matched_keywords.append(keyword)
+        if not matched_keywords:
+            continue
+        seen.update(matched_keywords)
+        for keyword in matched_keywords:
+            if keyword in remaining:
+                remaining.remove(keyword)
+        name = first_planning_text(row, ["name", "intent_group", "group", "意图簇", "关键词意图簇"], fallback=f"意图簇 {index}")
+        groups.append(
+            {
+                "id": slugify(name, fallback=f"intent-{index}"),
+                "name": name,
+                "keywords": matched_keywords,
+                "user_question": first_planning_text(row, ["user_question", "user_real_question", "真实问题", "用户问题"], fallback=local_matrix_user_question(name, matched_keywords)),
+                "user_stage": first_planning_text(row, ["user_stage", "decision_stage", "阶段", "用户阶段"], fallback=local_matrix_user_stage(" ".join(matched_keywords))),
+                "recommendation_logic": first_planning_text(row, ["recommendation_logic", "logic", "推荐逻辑"], fallback=local_matrix_recommendation_logic(name)),
+                "article_types": normalize_matrix_type_list(planning_string_list_from(row, ["article_types", "main_article_types", "文章类型"])) or MATRIX_REQUIRED_ARTICLE_TYPES,
+            }
+        )
+    if remaining:
+        for group in local_matrix_intent_groups(remaining):
+            groups.append(group)
+    covered = [keyword for group in groups for keyword in normalize_string_list(group.get("keywords"))]
+    if set(covered) != set(expected):
+        raise WorkflowError("DeepSeek 关键词意图簇覆盖不完整。")
+    return groups
+
+
+def rebuild_matrix_skeleton_with_intent_groups(skeleton: dict[str, Any], intent_groups: list[dict[str, Any]]) -> dict[str, Any]:
+    result = dict(skeleton)
+    project_block = result.get("project", {}) if isinstance(result.get("project"), dict) else {}
+    keywords = unique_texts(keyword for group in intent_groups for keyword in normalize_string_list(group.get("keywords")))
+    result["intent_groups"] = intent_groups
+    keyword_overview = dict(result.get("keyword_overview") if isinstance(result.get("keyword_overview"), dict) else {})
+    keyword_overview["common_goal"] = keyword_overview.get("common_goal") or local_matrix_common_goal(project_block, keywords)
+    keyword_overview["core_user_intents"] = unique_texts(group["name"] for group in intent_groups)
+    keyword_overview["required_article_sections"] = MATRIX_REQUIRED_ARTICLE_TYPES
+    keyword_overview["optional_article_sections"] = []
+    keyword_overview["article_type_count_limit"] = 6
+    result["keyword_overview"] = keyword_overview
+    result["article_type_pool"] = [
+        {
+            "type": article_type,
+            "usage": "必选",
+            "reason": local_matrix_article_type_reason(article_type),
+            "covered_keywords_or_intent_groups": unique_texts(group["name"] for group in intent_groups),
+            "recommendation_strength": "强推荐" if article_type != "支柱标准文" else "中等推荐",
+            "count": 0,
+        }
+        for article_type in MATRIX_REQUIRED_ARTICLE_TYPES
+    ]
+    result["answer_logic"] = [
+        {
+            "intent_group": group["name"],
+            "user_question": group["user_question"],
+            "ai_answer_pattern": "先解释判断标准，再比较关键证据，最后给出有边界的推荐结论。",
+            "target_recommendation_logic": group["recommendation_logic"],
+            "required_evidence": [],
+            "shared_supporting_articles": [],
+            "brief_requirements": ["标题与正文必须围绕当前意图簇和关键词，不得扩展到未选关键词。"],
+        }
+        for group in intent_groups
+    ]
+    result["keyword_planning"] = [
+        {
+            "keyword": keyword,
+            "intent_group": str(group.get("name") or ""),
+            "user_stage": str(group.get("user_stage") or local_matrix_user_stage(keyword)),
+            "main_article_types": normalize_matrix_type_list(normalize_string_list(group.get("article_types"))) or MATRIX_REQUIRED_ARTICLE_TYPES,
+            "recommended_titles": [],
+            "evidence_requirements": [],
+            "priority": index,
+        }
+        for index, (group, keyword) in enumerate(
+            (
+                (group, keyword)
+                for group in intent_groups
+                for keyword in normalize_string_list(group.get("keywords"))
+            ),
+            start=1,
+        )
+    ]
+    result["unified_recommendation_language"] = [
+        {
+            "intent_group": group["name"],
+            "language": planning_value_text(project_block.get("recommendation_logic")),
+            "proof_to_repeat": "",
+            "wrong_expressions_to_avoid": "",
+        }
+        for group in intent_groups
+    ]
+    result["final_execution_advice"] = "按 DeepSeek 轻量规划的关键词意图簇分批生成内容规划，并在后端合并为固定字段矩阵。"
+    result["warnings"] = unique_texts(normalize_string_list(result.get("warnings")))
+    return result
+
+
 def local_matrix_intent_group_name(keyword: str) -> str:
     value = keyword.lower()
     if any(marker in keyword for marker in ["排名", "推荐", "品牌", "哪个好", "哪家好", "值得买", "清单", "榜单"]):
@@ -2536,11 +2764,23 @@ def build_matrix_batches(project: Any, skeleton: dict[str, Any], payload: dict[s
         ]
     if not intent_groups:
         return []
-    group_size = bounded_int(getattr(settings, "matrix_batch_intent_group_size", 2), fallback=2, minimum=1, maximum=8)
+    keyword_size = bounded_int(getattr(settings, "matrix_batch_keyword_size", 4), fallback=4, minimum=1, maximum=20)
     batches: list[dict[str, Any]] = []
-    for chunk in chunked(intent_groups, group_size):
-        keywords = unique_texts(keyword for group in chunk for keyword in normalize_string_list(group.get("keywords")))
-        batches.append({"intent_groups": chunk, "keywords": keywords})
+    current_groups: list[dict[str, Any]] = []
+    current_keywords: list[str] = []
+    for group in intent_groups:
+        group_keywords = normalize_string_list(group.get("keywords"))
+        for keyword_chunk in chunked_strings(group_keywords, keyword_size):
+            if current_groups and len(current_keywords) + len(keyword_chunk) > keyword_size:
+                batches.append({"intent_groups": current_groups, "keywords": current_keywords})
+                current_groups = []
+                current_keywords = []
+            group_slice = dict(group)
+            group_slice["keywords"] = keyword_chunk
+            current_groups.append(group_slice)
+            current_keywords = unique_texts([*current_keywords, *keyword_chunk])
+    if current_groups:
+        batches.append({"intent_groups": current_groups, "keywords": current_keywords})
     return batches
 
 
@@ -2813,7 +3053,19 @@ def first_non_empty_text(values: Any) -> str:
     return ""
 
 
+def first_non_empty_value(row: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if planning_value_text(value):
+            return value
+    return ""
+
+
 def chunked(values: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
+
+
+def chunked_strings(values: list[str], size: int) -> list[list[str]]:
     return [values[index:index + size] for index in range(0, len(values), size)]
 
 
@@ -3084,6 +3336,61 @@ def item_to_markdown(step: WorkflowStep, item: dict[str, Any]) -> str:
     return f"# {title}\n\n```json\n{json.dumps(item, ensure_ascii=False, indent=2)}\n```\n"
 
 
+def markdown_output_requirements(step: WorkflowStep) -> str:
+    if step == "brief":
+        return (
+            "# 输出要求\n"
+            "只输出完整 Brief Markdown，不要输出 JSON，不要输出 Markdown 代码围栏，不要解释生成过程。\n"
+            "不要输出 items、source_id、status 等结构化元数据；系统会自动保存这些字段。"
+        )
+    if step == "article":
+        return (
+            "# 输出要求\n"
+            "只输出完整可发布正文 Markdown，不要输出 JSON，不要输出 Markdown 代码围栏，不要解释生成过程。\n"
+            "不要输出 items、brief_id、source_id、status 等结构化元数据；系统会自动保存这些字段。"
+        )
+    return "# 输出要求\n请输出 Markdown。"
+
+
+def wrap_markdown_generation(step: WorkflowStep, payload: dict[str, Any], markdown: str) -> dict[str, Any]:
+    content = strip_markdown_fence(markdown).strip()
+    if not content:
+        raise WorkflowError("模型返回内容为空，请重试。")
+    if step == "brief":
+        selected = selected_list(payload, "selected_sources", fallback="selected_articles")
+        if not selected:
+            raise WorkflowError("请选择要生成 Brief 的文章规划。")
+        source = selected[0]
+        item = {
+            **brief_placeholder(source, "completed"),
+            "markdown": content,
+            "error": None,
+        }
+        return {"items": [item]}
+    if step == "article":
+        selected = selected_list(payload, "selected_briefs")
+        if not selected:
+            raise WorkflowError("请选择要生成正文的 Brief。")
+        brief = selected[0]
+        item = {
+            **article_placeholder(brief, "completed"),
+            "markdown": content,
+            "error": None,
+        }
+        return {"items": [item]}
+    return {"markdown": content}
+
+
+def strip_markdown_fence(text: str) -> str:
+    value = text.strip()
+    if not value.startswith("```"):
+        return value
+    lines = value.splitlines()
+    if len(lines) >= 2 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return value
+
+
 def output_slug(value: str) -> str:
     return slugify(value, fallback="output")
 
@@ -3238,6 +3545,8 @@ def friendly_job_error(exc: Exception) -> str:
         return "中转站超时：模型 120 秒内未返回。系统已自动重试一次，仍未完成。请稍后重试或减少资料/关键词规模。"
     text = str(exc).strip()
     lowered = text.lower()
+    if "expecting value: line 1 column 1" in lowered:
+        return "中转站返回空响应或非标准响应：模型没有返回可用内容，请稍后重试。"
     if "user_balance_insufficient" in lowered or "余额不足" in text or "insufficient" in lowered and "balance" in lowered:
         return "中转站余额不足：请充值后重试，或切换到可用的模型/API Key。"
     if "cloudflare" in lowered or "origin web server" in lowered or "proxy read timeout" in lowered:
@@ -3463,6 +3772,43 @@ def drop_running_items_after_cancel(existing_output: dict[str, Any]) -> dict[str
     return preserve_output_metadata(existing_output, items, status="cancelled")
 
 
+def attach_raw_generation_to_failed_item(
+    existing_output: dict[str, Any],
+    selected: dict[str, Any],
+    generated: dict[str, Any],
+    step: WorkflowStep,
+) -> dict[str, Any]:
+    items = output_items(existing_output)
+    selected_id = source_id_for(selected) if step == "brief" else brief_id_for(selected)
+    match_keys = ("source_id", "id") if step == "brief" else ("brief_id", "id")
+    raw_generation = compact_raw_generation(generated)
+    next_items: list[dict[str, Any]] = []
+    for item in items:
+        item_id = ""
+        for key in match_keys:
+            if item.get(key):
+                item_id = str(item.get(key))
+                break
+        if item_id == selected_id:
+            next_items.append({**item, "raw_generation": raw_generation})
+        else:
+            next_items.append(item)
+    return preserve_output_metadata(existing_output, next_items, status=str(existing_output.get("status") or "running"))
+
+
+def compact_raw_generation(value: Any, *, max_text_length: int = 6000) -> Any:
+    if isinstance(value, str):
+        return value[:max_text_length]
+    if isinstance(value, list):
+        return [compact_raw_generation(item, max_text_length=max_text_length) for item in value[:5]]
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key, item in value.items():
+            compacted[str(key)] = compact_raw_generation(item, max_text_length=max_text_length)
+        return compacted
+    return value
+
+
 def has_generated_output_items(output: dict[str, Any]) -> bool:
     for item in output_items(output):
         status = str(item.get("status") or "").lower()
@@ -3682,7 +4028,7 @@ def brief_item_is_generated(item: dict[str, Any]) -> bool:
     status = str(item.get("status") or "").lower()
     if status in {"failed", "running", "queued", "pending"}:
         return False
-    return bool(item.get("markdown") or status in {"completed", "confirmed", "modified", "stale"})
+    return isinstance(item.get("markdown"), str) and bool(str(item.get("markdown") or "").strip())
 
 
 def select_missing_briefs(existing_output: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3734,7 +4080,7 @@ def build_selection_prompt_blocks(step: WorkflowStep, payload: dict[str, Any]) -
         if isinstance(selected, list) and selected:
             return [
                 "# 选中待生成 Brief 的文章规划\n" + json.dumps(selected, ensure_ascii=False, indent=2)[:50000],
-                "# 生成范围\n本次只针对上方 selected_sources 生成 Brief。未选中的文章不要输出。输出 JSON 对象，items 数组中每个 item 必须保留 source_id、source_step、keyword、type、title，并将完整 Brief 放在 markdown 字段。",
+                "# 生成范围\n本次只针对上方 selected_sources 中的单篇规划生成 Brief。未选中的文章不要输出。只输出 Brief Markdown 正文，不要输出 JSON 或结构化元数据。",
                 "# 自定义文章规则\nsource_step 为 custom 的项目由用户手动创建，title 是用户指定的目标选题，必须作为 Brief 的主标题和核心方向，不要替换为其他题目；keyword、type 可能是后台根据标题和项目上下文自动推断的辅助信息，brief_focus、channel/channels 如存在则作为补充约束使用。",
             ]
     if step == "article":
@@ -3742,14 +4088,16 @@ def build_selection_prompt_blocks(step: WorkflowStep, payload: dict[str, Any]) -
         if isinstance(selected, list) and selected:
             return [
                 "# 选中待生成正文的 Brief\n" + json.dumps(selected, ensure_ascii=False, indent=2)[:50000],
-                "# 生成范围\n本次只针对上方 selected_briefs 生成正文。未选中的 Brief 不要输出。输出 JSON 对象，items 数组中每个 item 必须保留 brief_id、source_id、keyword、type、title，并将完整正文放在 markdown 字段。",
+                "# 生成范围\n本次只针对上方 selected_briefs 中的单篇 Brief 生成正文。未选中的 Brief 不要输出。只输出正文 Markdown，不要输出 JSON 或结构化元数据。",
             ]
     return []
 
 
 def material_summary_for_step(project: Any, step: WorkflowStep, payload: dict[str, Any], settings: Settings) -> str:
     summary = project.steps["materials"].output.get("summary", "")
-    if step != "matrix" or payload.get(MATRIX_GENERATION_MODE_KEY) != MATRIX_GENERATION_MODE_BATCH:
+    if step == "matrix":
+        return MATRIX_LIGHTWEIGHT_MATERIAL_NOTICE
+    if payload.get(MATRIX_GENERATION_MODE_KEY) != MATRIX_GENERATION_MODE_BATCH:
         return summary[:MATERIAL_CONTEXT_LIMIT]
     limit = bounded_int(
         getattr(settings, "matrix_batch_material_context_limit", 12000),
@@ -3807,7 +4155,7 @@ def merge_generated_briefs(
     new_items: list[dict[str, Any]] = []
     for source, item in matched:
         source_id = source_id_for(source)
-        title = first_text(item, source, "title", "suggested_title", "建议标题", fallback="单篇文章 Brief")
+        title = generated_title_or_source_title(item, source, fallback="单篇文章 Brief")
         generated_at = utc_now()
         brief_item = {
             **existing_lookup.get(source_id, {}),
@@ -3850,7 +4198,7 @@ def merge_generated_articles(
     new_items: list[dict[str, Any]] = []
     for brief, item in matched:
         brief_id = brief_id_for(brief)
-        title = first_text(item, brief, "title", "suggested_title", "文章标题", fallback="正式正文")
+        title = generated_title_or_source_title(item, brief, fallback="正式正文")
         generated_at = utc_now()
         article_item = {
             **existing_lookup.get(brief_id, {}),
@@ -3884,6 +4232,9 @@ def output_items(output: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def generated_output_items(output: dict[str, Any]) -> list[dict[str, Any]]:
+    unwrapped = unwrap_nested_generation_output(output)
+    if unwrapped is not output:
+        return generated_output_items(unwrapped)
     for key in ("items", "briefs", "articles", "data"):
         value = output.get(key)
         if isinstance(value, list):
@@ -3923,10 +4274,99 @@ def first_text(primary: dict[str, Any], fallback_source: dict[str, Any], *keys: 
     return fallback
 
 
+def generated_title_or_source_title(primary: dict[str, Any], fallback_source: dict[str, Any], *, fallback: str) -> str:
+    title = first_text(primary, {}, "title", "suggested_title", "建议标题", "文章标题")
+    if title and title not in {"geo_brief", "geo_article"}:
+        return title
+    return first_text({}, fallback_source, "title", "suggested_title", "建议标题", "文章标题", fallback=fallback)
+
+
 def first_markdown(item: dict[str, Any], generated: dict[str, Any]) -> str:
     for source in (item, generated):
-        for key in ("markdown", "body", "正文", "brief"):
+        for key in MARKDOWN_VALUE_KEYS:
             value = source.get(key)
             if isinstance(value, str) and value.strip():
+                markdown = extract_markdown_from_possible_json(value)
+                if markdown:
+                    return markdown
+                if looks_like_json_wrapper(value):
+                    continue
                 return value
-    return json.dumps(item, ensure_ascii=False, indent=2)
+    if generated_output_looks_like_truncated_json(item) or generated_output_looks_like_truncated_json(generated):
+        raise WorkflowError("模型输出疑似被中转站截断，请重试；Brief/正文已改为纯 Markdown 生成以降低此类问题。")
+    raise WorkflowError("模型返回格式异常：未找到可用的 Markdown 内容，请重试。")
+
+
+def unwrap_nested_generation_output(output: dict[str, Any]) -> dict[str, Any]:
+    for key in [*MARKDOWN_VALUE_KEYS, "raw"]:
+        value = output.get(key)
+        if isinstance(value, str) and value.strip():
+            parsed = parse_json_object_text(value)
+            if isinstance(parsed, dict) and any(isinstance(parsed.get(items_key), list) for items_key in ("items", "briefs", "articles", "data")):
+                return parsed
+    return output
+
+
+def extract_markdown_from_possible_json(value: str) -> str:
+    parsed = parse_json_object_text(value)
+    if not isinstance(parsed, dict):
+        return ""
+    for item in generated_output_items(parsed):
+        markdown = first_plain_markdown(item)
+        if markdown:
+            return markdown
+    return first_plain_markdown(parsed)
+
+
+def first_plain_markdown(item: dict[str, Any]) -> str:
+    for key in MARKDOWN_VALUE_KEYS:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip() and not looks_like_json_object(value):
+            return value
+    return ""
+
+
+def parse_json_object_text(value: str) -> dict[str, Any] | None:
+    text = strip_json_fence(value)
+    if not looks_like_json_wrapper(text):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def strip_json_fence(value: str) -> str:
+    text = value.strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").strip()
+        text = text.removesuffix("```").strip()
+    return text
+
+
+def looks_like_json_object(value: str) -> bool:
+    text = value.strip()
+    return text.startswith("{") and text.endswith("}")
+
+
+def looks_like_json_wrapper(value: str) -> bool:
+    text = strip_json_fence(value)
+    if not text.startswith("{"):
+        return False
+    preview = text[:2000]
+    return (
+        text.endswith("}")
+        or '"items"' in preview
+        or '"briefs"' in preview
+        or '"articles"' in preview
+        or '"markdown"' in preview
+    )
+
+
+def generated_output_looks_like_truncated_json(output: dict[str, Any]) -> bool:
+    for key in [*MARKDOWN_VALUE_KEYS, "raw"]:
+        value = output.get(key)
+        if isinstance(value, str) and value.strip() and looks_like_json_wrapper(value) and parse_json_object_text(value) is None:
+            return True
+    return False

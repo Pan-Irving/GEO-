@@ -157,4 +157,6 @@ class UpdateItemRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     model: str
+    planning_model: str | None = None
+    writing_model: str | None = None
     skill_available: bool
