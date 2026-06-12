@@ -121,7 +121,8 @@ BREAKTHROUGH_ARTICLE_TYPES = [
     "产品证据文",
     "FAQ问答文",
 ]
-MATRIX_REQUIRED_ARTICLE_TYPES = BREAKTHROUGH_ARTICLE_TYPES
+MATRIX_CORE_ARTICLE_TYPES = BREAKTHROUGH_ARTICLE_TYPES
+MATRIX_REQUIRED_ARTICLE_TYPES = MATRIX_CORE_ARTICLE_TYPES
 MATRIX_OPTIONAL_ARTICLE_TYPES: list[str] = []
 MATRIX_BLOCKED_ARTICLE_TYPE_MARKERS = [
     "品牌认知文",
@@ -861,9 +862,9 @@ class AgentWorkflow:
                 "# 关键规则\n"
                 "- items 必须只来自 PDF 中“首轮文章清单/文章清单/建议文章清单”里的文章标题。\n"
                 "- 每个 item 是一篇文章规划，不是关键词分组行。\n"
-                "- type 只能使用固定六类："
-                + " / ".join(MATRIX_REQUIRED_ARTICLE_TYPES)
-                + "；FAQ 短文、FAQ问答短文统一为 FAQ问答文。\n"
+                "- type 优先归一为核心文章类型："
+                + " / ".join(MATRIX_CORE_ARTICLE_TYPES)
+                + "；如 PDF 中确有其他文章类型，可保留为扩展类型。FAQ 短文、FAQ问答短文统一为 FAQ问答文。\n"
                 "- keyword 必须从 PDF 的关键词池或关键词意图分组中选择最匹配的一个，禁止输出“未标注关键词”。\n"
                 "- source_step 必须是 matrix，status 必须是 completed。\n"
                 "- title 必须保留 PDF 原始文章标题，不要改写标题。\n"
@@ -1763,10 +1764,10 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
                 "items 必须表示“首轮文章清单”，每一项是一篇可进入 Brief 的文章规划，不是关键词分组行。\n"
                 "items 中每一项都必须包含这些 key："
                 f"{', '.join(PLANNING_ITEM_KEYS)}。\n"
-                "source_step 必须是 matrix；type 只能从固定六类中选择："
-                f"{' / '.join(MATRIX_REQUIRED_ARTICLE_TYPES)}。"
-                "不得新增第七类文章类型；支柱标准文章、FAQ问答短文等别名必须归一为固定类型。\n"
-                "当前批次不要求覆盖全部六类，但最终合并后必须覆盖六类；如果某类适合本批关键词，应在本批输出。\n"
+                "source_step 必须是 matrix；type 优先从核心类型中选择："
+                f"{' / '.join(MATRIX_CORE_ARTICLE_TYPES)}；如当前批次确实需要，可输出扩展文章类型。"
+                "支柱标准文章、FAQ问答短文等别名必须归一为核心类型。\n"
+                "当前批次不要求覆盖固定六类；只要输出可进入 Brief 的文章规划 items 即可。\n"
                 "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → intake核心证据摘要 → 用户价值 → 推荐结论”。\n"
                 "required_evidence / evidence_chain / brief_focus 写成 Brief 阶段需要核验和展开的证据要求，不要假装已经读完原始资料全文。\n"
                 "如果 intake 核心证据不足，把缺口写入 evidence_gaps 或 warnings，不要虚构证据、认证、排名、报告、专家、销量或案例。\n"
@@ -1781,9 +1782,9 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
             "证据链与资料缺口、共享支撑文、统一推荐口径、渠道规划、4-8周排期和 Brief 衔接要求，再输出首轮文章清单。\n"
             "不要把内容矩阵做成逐词孤立标题列表；高度相关关键词应使用共享支撑文覆盖。\n"
             "items 必须表示“首轮文章清单”，每一项是一篇可进入 Brief 的文章规划，不是关键词分组行。\n"
-            "items 至少覆盖 6 个必选文章板块，type 只能从以下六类中选择："
-            f"{' / '.join(MATRIX_REQUIRED_ARTICLE_TYPES)}。"
-            "不得新增第七类文章类型；支柱标准文章、FAQ问答短文等别名必须归一为固定类型。\n"
+            "type 优先从核心文章类型中选择："
+            f"{' / '.join(MATRIX_CORE_ARTICLE_TYPES)}；如内容矩阵确实需要，可输出扩展文章类型。"
+            "支柱标准文章、FAQ问答短文等别名必须归一为核心类型。\n"
             "items 中每一项都必须包含这些 key："
             f"{', '.join(PLANNING_ITEM_KEYS)}。\n"
             "每个 item 的 required_evidence / evidence_chain / brief_focus 必须体现“用户问题 → 判断标准 → intake核心证据摘要 → 用户价值 → 推荐结论”。\n"
@@ -1957,7 +1958,7 @@ def normalize_matrix_output(result: dict[str, Any]) -> dict[str, Any]:
     raw_items = [normalize_planning_item("matrix", row, index) for index, row in enumerate(rows, start=1)]
     items = [item for item in raw_items if matrix_article_type_allowed(item.get("type", ""))]
     if not items:
-        raise WorkflowError("内容矩阵输出格式不符合固定模板：未找到固定六类 items。")
+        raise WorkflowError("内容矩阵输出格式不符合固定模板：未找到可识别的文章规划 items。")
     validate_matrix_items(items)
     final_execution_advice = first_planning_text(result, ["final_execution_advice", "最终执行建议", "十四_最终执行建议"])
     if matrix_text_mentions_blocked_article_type(final_execution_advice):
@@ -1981,7 +1982,7 @@ def normalize_matrix_output(result: dict[str, Any]) -> dict[str, Any]:
         "priority_plan": normalize_matrix_priority_plan(result),
         "brief_requirements": normalize_matrix_brief_requirements(result),
         "final_execution_advice": final_execution_advice,
-        "warnings": filter_blocked_matrix_article_type_texts(planning_string_list_from(result, ["warnings", "风险提示", "注意事项"])),
+        "warnings": planning_string_list_from(result, ["warnings", "风险提示", "注意事项"]),
     }
 
 
@@ -2049,9 +2050,6 @@ def matrix_import_warnings(result: dict[str, Any]) -> list[str]:
     stats = matrix_import_stats(result)
     if stats["item_count"] < 1:
         warnings.append("未识别到文章规划。")
-    missing_types = [article_type for article_type in MATRIX_REQUIRED_ARTICLE_TYPES if article_type not in {item.get("type") for item in output_items(result)}]
-    if missing_types:
-        warnings.append(f"缺少固定文章类型：{'、'.join(missing_types)}")
     if stats["item_count"] and stats["item_count"] < 20:
         warnings.append("识别出的文章规划数量偏少，请在预览中核对 PDF 结构。")
     return warnings
@@ -2086,8 +2084,6 @@ def normalize_matrix_partial_output(result: dict[str, Any], batch: dict[str, Any
     items: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         item = normalize_planning_item("matrix", row, index)
-        if not matrix_article_type_allowed(item.get("type", "")):
-            continue
         if not item.get("intent_group"):
             item["intent_group"] = matrix_batch_intent_for_keyword(batch, str(item.get("keyword") or ""))
         if item.get("keyword") == "未标注关键词":
@@ -2097,7 +2093,7 @@ def normalize_matrix_partial_output(result: dict[str, Any], batch: dict[str, Any
                 item["source_id"] = planning_source_id("matrix", item["keyword"], item["type"], item["title"], index)
         items.append(item)
     if not items:
-        raise WorkflowError(f"内容矩阵第 {batch_index} 批输出格式不符合固定模板：未找到固定六类 items。")
+        raise WorkflowError(f"内容矩阵第 {batch_index} 批输出格式不符合固定模板：未找到可识别的文章规划 items。")
     return {
         "step": "geo_content_matrix",
         "schema_version": PLANNING_SCHEMA_VERSION,
@@ -2117,7 +2113,7 @@ def normalize_matrix_partial_output(result: dict[str, Any], batch: dict[str, Any
         "priority_plan": normalize_matrix_priority_plan(result),
         "brief_requirements": normalize_matrix_brief_requirements(result),
         "final_execution_advice": first_planning_text(result, ["final_execution_advice", "最终执行建议", "十四_最终执行建议"]),
-        "warnings": filter_blocked_matrix_article_type_texts(planning_string_list_from(result, ["warnings", "风险提示", "注意事项"])),
+        "warnings": planning_string_list_from(result, ["warnings", "风险提示", "注意事项"]),
     }
 
 
@@ -2198,14 +2194,11 @@ def validate_breakthrough_items(
 
 
 def validate_matrix_items(items: list[dict[str, Any]]) -> None:
-    present = {item["type"] for item in items if item.get("type")}
-    missing = [article_type for article_type in MATRIX_REQUIRED_ARTICLE_TYPES if article_type not in present]
-    invalid = sorted(article_type for article_type in present if not matrix_article_type_allowed(article_type))
     errors: list[str] = []
-    if missing:
-        errors.append(f"缺少必选文章板块：{'、'.join(missing)}")
-    if invalid:
-        errors.append(f"包含非固定六类文章类型：{'、'.join(invalid)}")
+    for index, item in enumerate(items, start=1):
+        missing_fields = [field for field in ("source_id", "keyword", "type", "title", "status") if not planning_value_text(item.get(field))]
+        if missing_fields:
+            errors.append(f"第 {index} 条缺少字段：{'、'.join(missing_fields)}")
     if errors:
         raise WorkflowError("内容矩阵输出格式不完整：" + "；".join(errors))
 
@@ -2245,27 +2238,43 @@ def normalize_matrix_article_type_pool(result: dict[str, Any], items: list[dict[
     if rows:
         for row in rows:
             article_type = normalize_matrix_type(first_planning_text(row, ["type", "article_type", "文章类型", "板块"]))
-            if not matrix_article_type_allowed(article_type):
+            if not article_type:
                 continue
             by_type[article_type] = {
                 "type": article_type,
-                "usage": "必选",
+                "usage": "核心" if article_type in MATRIX_CORE_ARTICLE_TYPES else "扩展",
                 "reason": first_planning_text(row, ["reason", "role", "core_role", "核心作用", "主要作用", "规划理由"]),
                 "covered_keywords_or_intent_groups": planning_string_list_from(row, ["covered_keywords_or_intent_groups", "keywords", "applicable_keywords", "适用关键词", "覆盖关键词", "覆盖意图簇"]),
                 "recommendation_strength": first_planning_text(row, ["recommendation_strength", "推荐强度"]),
                 "count": len([item for item in items if item["type"] == article_type]),
             }
-    return [
+    core_rows = [
         by_type.get(article_type, {
             "type": article_type,
-            "usage": "必选",
+            "usage": "核心",
             "reason": "",
             "covered_keywords_or_intent_groups": [],
             "recommendation_strength": "",
             "count": len([item for item in items if item["type"] == article_type]),
         })
-        for article_type in MATRIX_REQUIRED_ARTICLE_TYPES
+        for article_type in MATRIX_CORE_ARTICLE_TYPES
     ]
+    extension_types = sorted(
+        {item["type"] for item in items if item.get("type") and item["type"] not in MATRIX_CORE_ARTICLE_TYPES},
+        key=matrix_article_type_sort_key,
+    )
+    extension_rows = [
+        by_type.get(article_type, {
+            "type": article_type,
+            "usage": "扩展",
+            "reason": "",
+            "covered_keywords_or_intent_groups": [],
+            "recommendation_strength": "",
+            "count": len([item for item in items if item["type"] == article_type]),
+        })
+        for article_type in extension_types
+    ]
+    return core_rows + extension_rows
 
 
 def normalize_matrix_answer_logic(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2305,7 +2314,7 @@ def normalize_matrix_shared_supporting_articles(result: dict[str, Any]) -> list[
     normalized: list[dict[str, Any]] = []
     for row in rows:
         article_type = normalize_matrix_type(first_planning_text(row, ["type", "article_type", "文章类型"]))
-        if not matrix_article_type_allowed(article_type):
+        if not article_type:
             continue
         normalized.append(
             {
@@ -2352,7 +2361,7 @@ def normalize_matrix_publishing_plan(result: dict[str, Any]) -> list[dict[str, A
     normalized: list[dict[str, Any]] = []
     for row in rows:
         article_type = normalize_matrix_type(first_planning_text(row, ["article_type", "type", "文章类型"]))
-        if not matrix_article_type_allowed(article_type):
+        if not article_type:
             continue
         normalized.append(
             {
@@ -2378,7 +2387,7 @@ def normalize_matrix_schedule(result: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "stage": first_planning_text(row, ["stage", "阶段"]),
                 "period": first_planning_text(row, ["period", "week", "周期", "时间", "周次"]),
-                "key_tasks": filter_blocked_matrix_article_type_texts(raw_key_tasks),
+                "key_tasks": raw_key_tasks,
                 "article_types": article_types,
                 "goal": first_planning_text(row, ["goal", "目标", "阶段目标"]),
             }
@@ -2391,7 +2400,7 @@ def normalize_matrix_priority_plan(result: dict[str, Any]) -> list[dict[str, Any
     normalized: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         article_type = normalize_matrix_type(first_planning_text(row, ["type", "article_type", "文章类型"]))
-        if not matrix_article_type_allowed(article_type):
+        if not article_type:
             continue
         normalized.append(
             {
@@ -2500,7 +2509,7 @@ def build_local_matrix_skeleton(project: Any, payload: dict[str, Any]) -> dict[s
         "priority_plan": [],
         "brief_requirements": [
             {"field": "target_keyword", "requirement": "必须使用当前批次关键词，不得生成批次外关键词。"},
-            {"field": "article_type", "requirement": "必须归一到固定六类文章类型。"},
+            {"field": "article_type", "requirement": "优先归一到核心文章类型；确有需要时可保留扩展文章类型。"},
             {"field": "evidence_chain", "requirement": "必须体现用户问题、判断标准、目标对象证据、用户价值和推荐结论。"},
         ],
         "final_execution_advice": "按本地拆分的关键词意图簇分批生成内容规划，并在后端合并为固定字段矩阵。",
@@ -2836,7 +2845,7 @@ def merge_matrix_batch_outputs(skeleton: dict[str, Any], partials: list[dict[str
     sections = [skeleton, *partials]
     items = merge_matrix_items(item for section in sections for item in section.get("items", []) if isinstance(item, dict))
     if not items:
-        raise WorkflowError("内容矩阵输出格式不符合固定模板：未找到固定六类 items。")
+        raise WorkflowError("内容矩阵输出格式不符合固定模板：未找到可识别的文章规划 items。")
     validate_matrix_items(items)
 
     intent_groups = merge_matrix_records(
@@ -2883,7 +2892,7 @@ def merge_matrix_items(items: Any) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     by_key: dict[str, dict[str, Any]] = {}
     for index, item in enumerate(items, start=1):
-        if not isinstance(item, dict) or not matrix_article_type_allowed(str(item.get("type") or "")):
+        if not isinstance(item, dict) or not str(item.get("type") or "").strip():
             continue
         normalized = dict(item)
         normalized["source_step"] = "matrix"
@@ -3084,14 +3093,14 @@ def matrix_article_type_sort_key(article_type: str) -> tuple[int, str]:
 
 
 def matrix_article_type_allowed(article_type: str) -> bool:
-    return article_type in MATRIX_REQUIRED_ARTICLE_TYPES
+    return bool(str(article_type or "").strip())
 
 
 def normalize_matrix_type_list(values: list[str]) -> list[str]:
     normalized: list[str] = []
     for value in values:
         article_type = normalize_matrix_type(value)
-        if matrix_article_type_allowed(article_type) and article_type not in normalized:
+        if article_type and article_type not in normalized:
             normalized.append(article_type)
     return normalized
 

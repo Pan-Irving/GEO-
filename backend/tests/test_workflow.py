@@ -1472,8 +1472,7 @@ def test_planning_prompts_include_canonical_templates():
     assert "intent_groups=['id', 'name', 'keywords', 'user_question', 'user_stage', 'recommendation_logic', 'article_types']" in matrix_prompt
     assert "evidence_gaps=['keyword_or_intent_group', 'required_evidence', 'current_evidence', 'missing_evidence', 'impact', 'suggested_supplement']" in matrix_prompt
     assert "支柱标准文 / 榜单推荐文 / 横评对比文 / 场景选购文 / 产品证据文 / FAQ问答文" in matrix_prompt
-    assert "不得新增第七类文章类型" in matrix_prompt
-    assert "扩展类型" not in matrix_prompt
+    assert "扩展文章类型" in matrix_prompt
     assert "不得超过 10" not in matrix_prompt
     assert '"step": "geo_keyword_breakthrough"' in breakthrough_prompt
     assert "支柱标准文 / 榜单推荐文 / 横评对比文 / 场景选购文 / 产品证据文 / FAQ问答文" in breakthrough_prompt
@@ -1544,16 +1543,17 @@ def test_matrix_output_is_normalized_from_legacy_fields():
     assert chinese["items"][0]["required_evidence"] == ["证据1"]
 
 
-def test_matrix_output_missing_required_article_types_is_rejected():
-    with pytest.raises(WorkflowError, match="缺少必选文章板块"):
-        normalize_planning_output(
-            "matrix",
-            {"items": [{"keyword": "A", "type": "支柱标准文", "title": "A标准文"}]},
-            {},
-        )
+def test_matrix_output_allows_partial_core_article_types():
+    output = normalize_planning_output(
+        "matrix",
+        {"items": [{"keyword": "A", "type": "支柱标准文", "title": "A标准文"}]},
+        {},
+    )
+
+    assert [item["type"] for item in output["items"]] == ["支柱标准文"]
 
 
-def test_matrix_output_filters_non_core_article_types():
+def test_matrix_output_keeps_extension_article_types():
     output = normalize_planning_output(
         "matrix",
         {
@@ -1583,14 +1583,17 @@ def test_matrix_output_filters_non_core_article_types():
         {},
     )
 
-    assert "价格预算决策文" not in {item["type"] for item in output["items"]}
-    assert [item["type"] for item in output["article_type_pool"]] == MATRIX_ARTICLE_TYPES
-    assert output["intent_groups"][0]["article_types"] == ["支柱标准文"]
-    assert output["keyword_planning"][0]["main_article_types"] == ["榜单推荐文"]
-    assert output["shared_supporting_articles"] == []
-    assert output["publishing_plan"] == []
-    assert output["schedule"] == [{"stage": "第1周", "period": "", "key_tasks": ["发布支柱标准文"], "article_types": ["支柱标准文"], "goal": ""}]
-    assert output["priority_plan"] == []
+    assert "价格预算决策文" in {item["type"] for item in output["items"]}
+    assert [item["type"] for item in output["article_type_pool"]] == [*MATRIX_ARTICLE_TYPES, "价格预算决策文"]
+    assert output["intent_groups"][0]["article_types"] == ["支柱标准文", "价格预算决策文"]
+    assert output["keyword_planning"][0]["main_article_types"] == ["榜单推荐文", "价格预算决策文"]
+    assert output["shared_supporting_articles"][0]["type"] == "价格预算决策文"
+    assert output["publishing_plan"][0]["article_type"] == "价格预算决策文"
+    assert output["schedule"] == [
+        {"stage": "第1周", "period": "", "key_tasks": ["发布支柱标准文", "发布价格预算决策文"], "article_types": ["支柱标准文", "价格预算决策文"], "goal": ""},
+        {"stage": "第2周", "period": "", "key_tasks": [], "article_types": ["价格预算决策文"], "goal": ""},
+    ]
+    assert output["priority_plan"][0]["type"] == "价格预算决策文"
 
 
 def test_matrix_output_normalizes_user_article_type_aliases():
@@ -1604,12 +1607,13 @@ def test_matrix_output_normalizes_user_article_type_aliases():
     assert output["items"][-1]["type"] == "FAQ问答文"
 
 
-def test_matrix_output_rejects_when_filtering_removes_required_type():
+def test_matrix_output_allows_extension_type_without_all_core_types():
     rows = matrix_required_rows("A")[:-1]
     rows.append({"keyword": "A", "type": "价格预算决策文", "title": "A价格预算标题"})
 
-    with pytest.raises(WorkflowError, match="缺少必选文章板块"):
-        normalize_planning_output("matrix", {"items": rows}, {})
+    output = normalize_planning_output("matrix", {"items": rows}, {})
+
+    assert "价格预算决策文" in {item["type"] for item in output["items"]}
 
 
 def test_breakthrough_output_is_normalized_to_flat_fixed_six_items():
