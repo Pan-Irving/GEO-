@@ -1,6 +1,7 @@
-import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, ParseMode, Project, WorkflowStep } from "./types";
+import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, ParseMode, Project, PublishingUsageSummary, WorkflowStep } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
+const PUBLISHING_API_BASE = import.meta.env.VITE_PUBLISHING_API_BASE || "";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
@@ -49,6 +50,21 @@ async function requestBlob(url: string, init?: RequestInit): Promise<Blob> {
       throw new Error("请求超时，请刷新状态后重试。");
     }
     throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function optionalPublishingRequest<T>(path: string): Promise<T | null> {
+  if (!PUBLISHING_API_BASE) return null;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${PUBLISHING_API_BASE}${path}`, { signal: controller.signal });
+    if (!response.ok) return null;
+    return response.json() as Promise<T>;
+  } catch {
+    return null;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -133,5 +149,7 @@ export const api = {
     request<{ project: Project }>(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: "POST" }),
   getOutputs: (projectId: string) => request<{ files: string[] }>(`/api/projects/${projectId}/outputs`),
   getContentPlan: (projectId: string) => request<ContentPlan>(`/api/projects/${projectId}/content-plan`),
-  exportContentPlanPdf: (projectId: string) => requestBlob(`/api/projects/${projectId}/export/content-plan.pdf`)
+  exportContentPlanPdf: (projectId: string) => requestBlob(`/api/projects/${projectId}/export/content-plan.pdf`),
+  getPublishingUsageSummary: (projectId: string) =>
+    optionalPublishingRequest<PublishingUsageSummary>(`/api/projects/${encodeURIComponent(projectId)}/usage-summary`)
 };

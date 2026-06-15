@@ -1335,7 +1335,7 @@ p {
 
 .dashboard-kpi-row {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0;
 }
 
@@ -1414,6 +1414,10 @@ p {
 
 .stage-dot.used {
   background: #249461;
+}
+
+.stage-dot.purchasing {
+  background: #b97618;
 }
 
 .stage-dot.article_done {
@@ -1597,6 +1601,12 @@ p {
   color: #135c7b;
   border-color: #4f9bc0;
   background: #d8edf6;
+}
+
+.dashboard-matrix-cell.purchasing {
+  color: #81510f;
+  border-color: #d69a3a;
+  background: #fff1d5;
 }
 
 .dashboard-matrix-cell.used {

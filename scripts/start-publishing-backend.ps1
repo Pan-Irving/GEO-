@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
-Set-Location (Join-Path $RootDir "backend")
+Set-Location (Join-Path $RootDir "publishing\backend")
 
 function Test-Venv($Path) {
   $PythonExe = Join-Path $Path "Scripts\python.exe"
@@ -13,17 +13,17 @@ function Test-Venv($Path) {
 }
 
 $VenvDir = $null
-$BackendVenv = Join-Path $RootDir "backend\.venv"
+$PublishingVenv = Join-Path $RootDir "publishing\backend\.venv"
 $RootVenv = Join-Path $RootDir ".venv"
-if (Test-Venv $BackendVenv) {
-  $VenvDir = $BackendVenv
+if (Test-Venv $PublishingVenv) {
+  $VenvDir = $PublishingVenv
 } elseif (Test-Venv $RootVenv) {
   $VenvDir = $RootVenv
 }
 
 if (-not $VenvDir) {
-  Write-Error "No Python virtual environment found. Run: python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install -r backend\requirements.txt"
+  Write-Error "No Python virtual environment found. Run: python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install -r publishing\backend\requirements.txt"
 }
 
 & (Join-Path $VenvDir "Scripts\Activate.ps1")
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8010

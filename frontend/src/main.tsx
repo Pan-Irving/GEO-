@@ -29,7 +29,7 @@ import {
   X
 } from "lucide-react";
 import { api } from "./api/client";
-import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, Project, WorkflowStep } from "./api/types";
+import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, Project, PublishingUsageSummary, WorkflowStep } from "./api/types";
 import "./styles/app.css";
 
 type AppView = "dashboard" | "upload" | "planning" | "custom" | "brief" | "article" | "library";
@@ -38,7 +38,7 @@ type EditableStep = "matrix" | "breakthrough" | "brief" | "article";
 type BriefModifiedFilter = "all" | "modified" | "unmodified";
 type BriefArticleFilter = "all" | "generated" | "not_generated" | "needs_update" | "failed" | "pending_review" | "approved";
 type CustomBriefFilter = "all" | "generated" | "not_generated";
-type DashboardProductionStage = "pending_plan" | "pending_brief" | "brief_done" | "article_pending" | "article_done" | "used";
+type DashboardProductionStage = "pending_plan" | "pending_brief" | "brief_done" | "article_pending" | "article_done" | "purchasing" | "used";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -138,6 +138,7 @@ interface DashboardProgressRow {
   articles: number;
   completed: number;
   used: number;
+  purchasing: number;
   percent: number;
   drilldown: DashboardDrilldown;
 }
@@ -151,6 +152,7 @@ interface DashboardMatrixCell {
   articles: number;
   completed: number;
   used: number;
+  purchasing: number;
   stale: number;
   stage: DashboardProductionStage;
   label: string;
@@ -168,6 +170,7 @@ interface DashboardData {
     articles: number;
     completed: number;
     used: number;
+    purchasing: number;
     pendingBriefs: number;
     pendingArticles: number;
     staleArticles: number;
@@ -195,6 +198,7 @@ const emptyCustomFilters: CustomFilterState = {
 
 const coreArticleTypes = ["支柱标准文", "榜单推荐文", "横评对比文", "场景选购文", "产品证据文", "FAQ问答文"];
 const coreArticleTypeSet = new Set(coreArticleTypes);
+const publishingFrontendUrl = import.meta.env.VITE_PUBLISHING_FRONTEND_URL || "http://127.0.0.1:5174";
 
 const appSteps: Array<{ id: AppView; title: string; desc: string; backendStep?: WorkflowStep }> = [
   { id: "dashboard", title: "项目看板", desc: "整体产出与进度" },
@@ -233,6 +237,7 @@ function App() {
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null);
   const [projectName, setProjectName] = useState("GEO 内容项目");
   const [health, setHealth] = useState<{ model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean } | null>(null);
+  const [publishingUsage, setPublishingUsage] = useState<PublishingUsageSummary | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const selectedProjectIdRef = useRef("");
@@ -283,6 +288,7 @@ function App() {
       selectedProjectIdRef.current = "";
       setSelectedProjectId("");
       setProject(null);
+      setPublishingUsage(null);
     }
   }
 
@@ -290,6 +296,8 @@ function App() {
     const next = await api.getProject(projectId);
     if (selectedProjectIdRef.current !== projectId) return;
     updateProjectState(next);
+    const usage = await api.getPublishingUsageSummary(projectId);
+    if (selectedProjectIdRef.current === projectId) setPublishingUsage(usage);
   }
 
   function updateProjectState(next: Project) {
@@ -304,6 +312,7 @@ function App() {
     setSelectedBriefs(new Set());
     setSelectedArticles(new Set());
     setSelectedArchiveArticles(new Set());
+    setPublishingUsage(null);
     setDetail(null);
     setMessage("");
     if (!projectId) {
@@ -549,6 +558,7 @@ function App() {
           <div className="actions">
             {busy && <span className="pill"><Loader2 className="spin" size={14} />运行中</span>}
             {health && <span className="pill">规划 {health.planning_model || health.model} / 写作 {health.writing_model || health.model} / Skill {health.skill_available ? "已识别" : "缺失"}</span>}
+            <a className="btn" href={publishingFrontendUrl} target="_blank" rel="noreferrer"><ArrowUpRight size={15} />发布工作台</a>
             <button className="btn" onClick={() => void manualRefresh()}><RefreshCw size={15} />刷新状态</button>
           </div>
         </section>
@@ -556,7 +566,7 @@ function App() {
         {message && <div className="notice">{message}</div>}
         {!project ? <EmptyState /> : (
           <>
-            {current === "dashboard" && <DashboardView project={project} data={data} setCurrent={setCurrent} openDrilldown={openDashboardDrilldown} />}
+            {current === "dashboard" && <DashboardView project={project} data={data} publishingUsage={publishingUsage} setCurrent={setCurrent} openDrilldown={openDashboardDrilldown} />}
             {current === "upload" && (
               <UploadView
                 project={project}
@@ -696,13 +706,14 @@ function App() {
   );
 }
 
-function DashboardView({ project, data, setCurrent, openDrilldown }: {
+function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldown }: {
   project: Project;
   data: DerivedData;
+  publishingUsage: PublishingUsageSummary | null;
   setCurrent: (view: AppView) => void;
   openDrilldown: (target: DashboardDrilldown) => void;
 }) {
-  const dashboard = deriveDashboardData(project, data);
+  const dashboard = deriveDashboardData(project, data, publishingUsage);
   const [matrixSearch, setMatrixSearch] = useState("");
   const normalizedSearch = matrixSearch.trim().toLowerCase();
   const matrixKeywords = dashboard.keywords.filter(row => !normalizedSearch || row.label.toLowerCase().includes(normalizedSearch));
@@ -753,7 +764,8 @@ function DashboardView({ project, data, setCurrent, openDrilldown }: {
         <DashboardKpiCard label="Brief 产出" value={dashboard.totals.briefs} total={dashboard.totals.plans} caption={`${dashboard.totals.pendingBriefs} 篇规划待生成`} tone="cyan" onClick={() => openDrilldown({ view: "brief", articleStatus: "not_generated" })} />
         <DashboardKpiCard label="正文产出" value={generatedArticles} total={dashboard.totals.plans} caption={`${dashboard.totals.pendingArticles} 篇待继续推进`} tone="indigo" onClick={() => openDrilldown({ view: "article" })} />
         <DashboardKpiCard label="完成定稿" value={dashboard.totals.completed} total={dashboard.totals.plans} caption={`${finalNotUsed} 篇待发布使用`} tone="green" onClick={() => openDrilldown({ view: "article", articleStatus: "approved" })} />
-        <DashboardKpiCard label="已经使用" value={dashboard.totals.used} total={dashboard.totals.plans} caption={dashboard.totals.used ? "已标记发布使用" : "暂无已使用标记"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "generated" })} />
+        <DashboardKpiCard label="采购中" value={dashboard.totals.purchasing} total={dashboard.totals.plans} caption={publishingUsage ? "来自发布系统采购记录" : "未连接发布系统"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "approved" })} />
+        <DashboardKpiCard label="已经使用" value={dashboard.totals.used} total={dashboard.totals.plans} caption={publishingUsage ? "来自发布系统已发布记录" : dashboard.totals.used ? "已标记发布使用" : "暂无已使用标记"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "generated" })} />
       </div>
 
       <section className="dashboard-panel dashboard-matrix-panel">
@@ -764,6 +776,7 @@ function DashboardView({ project, data, setCurrent, openDrilldown }: {
           </div>
           <div className="dashboard-legend">
             <span className="stage-dot used" />已使用
+            <span className="stage-dot purchasing" />采购中
             <span className="stage-dot article_done" />已定稿
             <span className="stage-dot article_pending" />正文待审
             <span className="stage-dot brief_done" />Brief完成
@@ -803,7 +816,7 @@ function DashboardView({ project, data, setCurrent, openDrilldown }: {
                         <button className={`dashboard-matrix-cell ${cell.stage}`} onClick={() => openDrilldown(cell.drilldown)}>
                           <strong>{cell.label}</strong>
                           <span>{cell.plans} 规划 · {cell.briefs} Brief</span>
-                          <span>{cell.articles} 正文 · {cell.used} 已使用</span>
+                          <span>{cell.articles} 正文 · {cell.used} 已使用 · {cell.purchasing} 采购中</span>
                         </button>
                       </td>
                     );
@@ -3392,7 +3405,7 @@ function deriveProjectData(project: Project): DerivedData {
   };
 }
 
-function deriveDashboardData(project: Project, data: DerivedData): DashboardData {
+function deriveDashboardData(project: Project, data: DerivedData, publishingUsage: PublishingUsageSummary | null): DashboardData {
   const briefBySource = new Map(data.briefs.map(item => [item.sourceId, item]));
   const briefById = new Map(data.briefs.map(item => [item.id, item]));
   const articlesByBriefId = new Map(data.articles.map(item => [item.briefId || item.id, item]));
@@ -3403,7 +3416,8 @@ function deriveDashboardData(project: Project, data: DerivedData): DashboardData
   ]).filter(keyword => keyword && keyword !== "未标注关键词");
   const articleTypes = orderedArticleTypes(allContentItems, true, false);
   const articleFinalCount = data.articles.filter(article => articleIsFinal(article, briefById)).length;
-  const articleUsedCount = data.articles.filter(itemIsUsed).length;
+  const articleUsedCount = data.articles.filter(article => articlePublishedCount(article, publishingUsage) > 0 || itemIsUsed(article)).length;
+  const articlePurchasingCount = data.articles.filter(article => articlePurchasingCountFor(article, publishingUsage) > 0).length;
   const staleArticles = data.articles.filter(article => !articleIsFinal(article, briefById)).length;
   const pendingBriefs = data.plans.filter(plan => !briefIsGenerated(briefBySource.get(plan.sourceId))).length;
   const pendingArticles = data.briefs.filter(brief => {
@@ -3418,6 +3432,7 @@ function deriveDashboardData(project: Project, data: DerivedData): DashboardData
     data.briefs.filter(item => item.keyword === keyword),
     data.articles.filter(item => item.keyword === keyword),
     briefById,
+    publishingUsage,
     { view: "planning", tab: "matrix", keyword }
   ));
 
@@ -3428,6 +3443,7 @@ function deriveDashboardData(project: Project, data: DerivedData): DashboardData
     data.briefs.filter(item => item.type === type),
     data.articles.filter(item => item.type === type),
     briefById,
+    publishingUsage,
     { view: "planning", tab: "matrix", articleType: type }
   ));
 
@@ -3435,7 +3451,7 @@ function deriveDashboardData(project: Project, data: DerivedData): DashboardData
     const plans = data.plans.filter(item => item.keyword === keyword && item.type === type);
     const briefs = data.briefs.filter(item => item.keyword === keyword && item.type === type);
     const articles = data.articles.filter(item => item.keyword === keyword && item.type === type);
-    return dashboardMatrixCell(keyword, type, plans, briefs, articles, briefById);
+    return dashboardMatrixCell(keyword, type, plans, briefs, articles, briefById, publishingUsage);
   }));
 
   return {
@@ -3449,6 +3465,7 @@ function deriveDashboardData(project: Project, data: DerivedData): DashboardData
       articles: data.articles.length,
       completed: articleFinalCount,
       used: articleUsedCount,
+      purchasing: articlePurchasingCount,
       pendingBriefs,
       pendingArticles,
       staleArticles,
@@ -3497,9 +3514,12 @@ function dashboardProgressRow(
   briefs: ContentItem[],
   articles: ContentItem[],
   briefById: Map<string, ContentItem>,
+  publishingUsage: PublishingUsageSummary | null,
   drilldown: DashboardDrilldown
 ): DashboardProgressRow {
   const completed = articles.filter(article => articleIsFinal(article, briefById)).length;
+  const used = articles.filter(article => articlePublishedCount(article, publishingUsage) > 0 || itemIsUsed(article)).length;
+  const purchasing = articles.filter(article => articlePurchasingCountFor(article, publishingUsage) > 0).length;
   const total = Math.max(plans.length, briefs.length, articles.length);
   return {
     id,
@@ -3508,7 +3528,8 @@ function dashboardProgressRow(
     briefs: briefs.length,
     articles: articles.length,
     completed,
-    used: articles.filter(itemIsUsed).length,
+    used,
+    purchasing,
     percent: percentOf(completed, total),
     drilldown
   };
@@ -3520,12 +3541,14 @@ function dashboardMatrixCell(
   plans: ContentItem[],
   briefs: ContentItem[],
   articles: ContentItem[],
-  briefById: Map<string, ContentItem>
+  briefById: Map<string, ContentItem>,
+  publishingUsage: PublishingUsageSummary | null
 ): DashboardMatrixCell {
   const completed = articles.filter(article => articleIsFinal(article, briefById)).length;
-  const used = articles.filter(itemIsUsed).length;
+  const used = articles.filter(article => articlePublishedCount(article, publishingUsage) > 0 || itemIsUsed(article)).length;
+  const purchasing = articles.filter(article => articlePurchasingCountFor(article, publishingUsage) > 0).length;
   const stale = articles.filter(article => !articleIsFinal(article, briefById)).length;
-  const stage = dashboardCellStage(plans.length, briefs.length, articles.length, completed, used);
+  const stage = dashboardCellStage(plans.length, briefs.length, articles.length, completed, used, purchasing);
   return {
     id: stableContentId("dashboard", keyword, type, "", `${keyword}-${type}`),
     keyword,
@@ -3535,28 +3558,31 @@ function dashboardMatrixCell(
     articles: articles.length,
     completed,
     used,
+    purchasing,
     stale,
     stage,
-    label: dashboardStageLabel(stage, briefs.length, completed, used),
+    label: dashboardStageLabel(stage, briefs.length, completed, used, purchasing),
     drilldown: dashboardDrilldownForStage(stage, keyword, type)
   };
 }
 
-function dashboardCellStage(planCount: number, briefCount: number, articleCount: number, completedCount: number, usedCount: number): DashboardProductionStage {
+function dashboardCellStage(planCount: number, briefCount: number, articleCount: number, completedCount: number, usedCount: number, purchasingCount: number): DashboardProductionStage {
   if (!planCount && !briefCount && !articleCount) return "pending_plan";
   if (usedCount > 0) return "used";
+  if (purchasingCount > 0) return "purchasing";
   if (completedCount > 0) return "article_done";
   if (articleCount > 0) return "article_pending";
   if (briefCount > 0) return "brief_done";
   return "pending_brief";
 }
 
-function dashboardStageLabel(stage: DashboardProductionStage, briefCount: number, completedCount: number, usedCount: number): string {
+function dashboardStageLabel(stage: DashboardProductionStage, briefCount: number, completedCount: number, usedCount: number, purchasingCount: number): string {
   if (stage === "pending_plan") return "待补规划";
   if (stage === "pending_brief") return "待生成 Brief";
   if (stage === "brief_done") return `${briefCount} Brief完成`;
   if (stage === "article_pending") return "正文待审";
   if (stage === "article_done") return `${completedCount} 已定稿`;
+  if (stage === "purchasing") return `${purchasingCount} 采购中`;
   return `${usedCount} 已使用`;
 }
 
@@ -3566,7 +3592,18 @@ function dashboardDrilldownForStage(stage: DashboardProductionStage, keyword: st
   if (stage === "brief_done") return { view: "brief", articleStatus: "not_generated", ...base };
   if (stage === "article_pending") return { view: "article", articleStatus: "pending_review", ...base };
   if (stage === "article_done") return { view: "article", articleStatus: "approved", ...base };
+  if (stage === "purchasing") return { view: "article", articleStatus: "approved", ...base };
   return { view: "article", articleStatus: "generated", ...base };
+}
+
+function articlePublishedCount(article: ContentItem, publishingUsage: PublishingUsageSummary | null): number {
+  const usage = publishingUsage?.articles.find(item => item.article_id === article.id);
+  return usage?.published_count || 0;
+}
+
+function articlePurchasingCountFor(article: ContentItem, publishingUsage: PublishingUsageSummary | null): number {
+  const usage = publishingUsage?.articles.find(item => item.article_id === article.id);
+  return usage?.purchasing_count || 0;
 }
 
 function orderedArticleTypes(items: ContentItem[], includeCore = false, includeDiscovered = true): string[] {

@@ -99,6 +99,32 @@ export interface Project {
   jobs: Job[];
 }
 
+export interface PublishingUsageSummary {
+  project_id: string;
+  totals: {
+    articles: number;
+    available: number;
+    published: number;
+    purchasing: number;
+  };
+  matrix: Array<{
+    keyword: string;
+    article_type: string;
+    total: number;
+    available: number;
+    published: number;
+    purchasing: number;
+  }>;
+  articles: Array<{
+    article_id: string;
+    keyword: string;
+    article_type: string;
+    published_count: number;
+    purchasing_count: number;
+    inventory_status: string;
+  }>;
+}
+
 export interface ContentPlan {
   schema_version: string;
   project_id: string;
