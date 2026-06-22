@@ -131,6 +131,8 @@ export const api = {
     request<{ record: PublicationRecord }>("/api/publications/web", { method: "POST", body: JSON.stringify(payload) }),
   updatePublication: (recordId: string, payload: Record<string, unknown>) =>
     request<{ record: PublicationRecord }>(`/api/publications/${encodeURIComponent(recordId)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deletePublication: (recordId: string) =>
+    request<{ deleted: boolean }>(`/api/publications/${encodeURIComponent(recordId)}`, { method: "DELETE" }),
   syncProject: (projectId: string) => request<{ sync: { created: number; updated: number; deactivated: number; total: number }; message: string }>(`/api/sync/projects/${encodeURIComponent(projectId)}`, { method: "POST" }),
   users: () => request<{ users: User[] }>("/api/admin/users"),
   createUser: (payload: Record<string, unknown>) =>

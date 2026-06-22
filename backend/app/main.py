@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.core.config import get_settings
-from app.storage.repository import ProjectRepository
+from app.storage.factory import create_project_repository
 
 
 settings = get_settings()
@@ -13,7 +13,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ProjectRepository(settings.data_root).recover_interrupted_jobs()
+    create_project_repository(settings).recover_interrupted_jobs()
     yield
 
 

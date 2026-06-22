@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     planning_stream: bool | None = None
     planning_timeout_seconds: float = 0
     openai_vision_model: str = ""
-    enable_vision_ocr: bool = False
+    enable_vision_ocr: bool = True
     vision_ocr_timeout_seconds: float = 90
     vision_ocr_max_pages: int = 4
     enable_local_ocr: bool = True
@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     job_terminate_grace_seconds: float = 2
     job_child_process_timeout_seconds: float = 0
     app_data_dir: str = "app-data"
+    writing_storage_backend: str = "file"
+    writing_database_url: str = ""
+    publishing_database_url: str = ""
+    publishing_frontend_url: str = "http://127.0.0.1:5174"
     frontend_origin: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(
@@ -60,6 +64,10 @@ class Settings(BaseSettings):
     @property
     def skill_root(self) -> Path:
         return PROJECT_ROOT / "mindsun-geo-content-flow"
+
+    @property
+    def writing_database_dsn(self) -> str:
+        return self.writing_database_url
 
 
 @lru_cache

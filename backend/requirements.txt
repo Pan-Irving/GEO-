@@ -11,3 +11,6 @@ reportlab==4.2.5
 rapidocr-onnxruntime==1.2.3
 pytest==8.3.4
 httpx==0.28.1
+sqlalchemy==2.0.36
+PyMySQL==1.1.1
+alembic==1.14.1

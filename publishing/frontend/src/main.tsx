@@ -18,7 +18,6 @@ import {
   Save,
   Search,
   Send,
-  ShieldCheck,
   UserRound,
   UserPlus,
   Users,
@@ -28,11 +27,31 @@ import { api, type ArticleSnapshot, type Assignment, type InventoryResponse, typ
 import "./styles.css";
 
 type View = "dashboard" | "library" | "records" | "log" | "admin";
+interface LibraryFocus {
+  keyword: string;
+  articleType: string;
+}
+
+interface AssignmentDraft {
+  user_id: string;
+  project_id: string;
+  keywords: string[];
+  article_types: string[];
+}
+
+interface AssignmentOptions {
+  keywords: string[];
+  articleTypes: string[];
+}
+
 type ModalState =
   | { type: "article"; article: ArticleSnapshot }
   | { type: "self"; article: ArticleSnapshot }
   | { type: "web"; article: ArticleSnapshot }
   | { type: "complete"; record: PublicationRecord }
+  | { type: "editSelf"; record: PublicationRecord }
+  | { type: "editWeb"; record: PublicationRecord }
+  | { type: "deleteRecord"; record: PublicationRecord }
   | null;
 
 interface Options {
@@ -67,6 +86,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [modal, setModal] = useState<ModalState>(null);
+  const [libraryFocus, setLibraryFocus] = useState<LibraryFocus | null>(null);
   const messageTimerRef = useRef<number | null>(null);
 
   const isAdmin = user?.role === "admin" || user?.role === "manager";
@@ -210,6 +230,7 @@ function App() {
     setLogRecords([]);
     setInventory(null);
     setActiveProjectId("");
+    setLibraryFocus(null);
   }
 
   async function refreshAll() {
@@ -237,34 +258,41 @@ function App() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="app-brand">
-          <ShieldCheck size={28} />
-          <div>
-            <strong>GEO 发布工作台</strong>
-            <span>库存发布 · 链接回填 · 消耗统计</span>
+        <div className="sidebar-brand">
+          <img className="sidebar-logo" src="/mindsun-logo.png" alt="思阳集团" />
+          <strong className="brand-title">GEO 发布工作台</strong>
+          <span className="brand-subtitle">库存发布 · 链接回填 · 消耗统计</span>
+        </div>
+
+        <div className="project-card">
+          <div className="user-box">
+            <strong>{user.display_name}</strong>
+            <span>{roleLabel(user.role)}</span>
           </div>
+
+          <label className="project-select">
+            <span>当前项目</span>
+            <select value={activeProjectId} onChange={event => {
+              setActiveProjectId(event.target.value);
+              setLibraryFocus(null);
+            }}>
+              {projects.length ? projects.map(project => (
+                <option key={project.project_id} value={project.project_id}>{project.project_name}</option>
+              )) : <option value="">暂无已同步项目</option>}
+            </select>
+          </label>
         </div>
 
-        <div className="user-box">
-          <strong>{user.display_name}</strong>
-          <span>{roleLabel(user.role)}</span>
-        </div>
-
-        <label className="project-select">
-          <span>当前项目</span>
-          <select value={activeProjectId} onChange={event => setActiveProjectId(event.target.value)}>
-            {projects.length ? projects.map(project => (
-              <option key={project.project_id} value={project.project_id}>{project.project_name}</option>
-            )) : <option value="">暂无已同步项目</option>}
-          </select>
-        </label>
-
-        <nav className="nav">
-          <NavButton active={view === "dashboard"} icon={<LayoutDashboard size={17} />} label="库存看板" onClick={() => setView("dashboard")} />
-          <NavButton active={view === "library"} icon={<Library size={17} />} label="文章库" onClick={() => setView("library")} />
-          <NavButton active={view === "records"} icon={<Link2 size={17} />} label="发布记录" onClick={() => setView("records")} />
-          <NavButton active={view === "log"} icon={<BarChart3 size={17} />} label="工作日志" onClick={() => setView("log")} />
-          {isAdmin && <NavButton active={view === "admin"} icon={<Users size={17} />} label="管理设置" onClick={() => setView("admin")} />}
+        <div className="section-label">发布流程</div>
+        <nav className="nav steps">
+          <NavButton active={view === "dashboard"} icon={<LayoutDashboard size={17} />} label="库存看板" desc="整体库存与低库存" onClick={() => setView("dashboard")} />
+          <NavButton active={view === "library"} icon={<Library size={17} />} label="文章库" desc="领取定稿发布" onClick={() => {
+            setLibraryFocus(null);
+            setView("library");
+          }} />
+          <NavButton active={view === "records"} icon={<Link2 size={17} />} label="发布记录" desc="链接回填与撤销" onClick={() => setView("records")} />
+          <NavButton active={view === "log"} icon={<BarChart3 size={17} />} label="工作日志" desc="员工消耗统计" onClick={() => setView("log")} />
+          {isAdmin && <NavButton active={view === "admin"} icon={<Users size={17} />} label="管理设置" desc="人员与项目同步" onClick={() => setView("admin")} />}
         </nav>
       </aside>
 
@@ -287,16 +315,37 @@ function App() {
           <EmptyState isAdmin={isAdmin} onAdmin={() => setView("admin")} />
         ) : (
           <>
-            {view === "dashboard" && inventory && <Dashboard inventory={inventory} />}
+            {view === "dashboard" && inventory && (
+              <Dashboard
+                inventory={inventory}
+                isAdmin={isAdmin}
+                onOpenArticles={(focus) => {
+                  setLibraryFocus(focus);
+                  setView("library");
+                }}
+              />
+            )}
             {view === "library" && inventory && (
               <ArticleLibrary
                 inventory={inventory}
+                focus={libraryFocus}
+                onClearFocus={() => setLibraryFocus(null)}
                 onPreview={article => setModal({ type: "article", article })}
                 onSelf={article => setModal({ type: "self", article })}
                 onWeb={article => setModal({ type: "web", article })}
               />
             )}
-            {view === "records" && inventory && <Records records={inventory.records} isAdmin={isAdmin} onComplete={record => setModal({ type: "complete", record })} />}
+            {view === "records" && inventory && (
+              <Records
+                records={inventory.records}
+                isAdmin={isAdmin}
+                currentUser={user}
+                onComplete={record => setModal({ type: "complete", record })}
+                onEditSelf={record => setModal({ type: "editSelf", record })}
+                onEditWeb={record => setModal({ type: "editWeb", record })}
+                onDelete={record => setModal({ type: "deleteRecord", record })}
+              />
+            )}
             {view === "log" && inventory && (
               <WorkLog
                 records={isAdmin ? logRecords : inventory.records}
@@ -350,10 +399,43 @@ function App() {
       {modal?.type === "complete" && (
         <CompleteWebModal
           record={modal.record}
+          options={options}
           onClose={() => setModal(null)}
           onSubmit={async payload => {
             await api.updatePublication(modal.record.id, payload);
             await afterPublication("网媒发布结果已回填。");
+          }}
+        />
+      )}
+      {modal?.type === "editSelf" && (
+        <EditSelfPublicationModal
+          record={modal.record}
+          options={options}
+          onClose={() => setModal(null)}
+          onSubmit={async payload => {
+            await api.updatePublication(modal.record.id, payload);
+            await afterPublication("自营发布记录已修改。");
+          }}
+        />
+      )}
+      {modal?.type === "editWeb" && (
+        <EditWebPublicationModal
+          record={modal.record}
+          options={options}
+          onClose={() => setModal(null)}
+          onSubmit={async payload => {
+            await api.updatePublication(modal.record.id, payload);
+            await afterPublication("网媒发布记录已修改。");
+          }}
+        />
+      )}
+      {modal?.type === "deleteRecord" && (
+        <DeletePublicationModal
+          record={modal.record}
+          onClose={() => setModal(null)}
+          onConfirm={async () => {
+            await api.deletePublication(modal.record.id);
+            await afterPublication("发布记录已撤销。");
           }}
         />
       )}
@@ -368,7 +450,7 @@ function LoginScreen({ loading, message, onLogin }: { loading: boolean; message:
     <div className="login-page">
       <section className="login-card">
         <div className="login-hero">
-          <ShieldCheck size={36} />
+          <img className="login-logo" src="/mindsun-logo.png" alt="思阳集团" />
           <h1>思阳 GEO 发布工作台</h1>
           <p>员工按负责板块领取定稿文章，完成自媒体发布或网媒采购登记，发布消耗会反馈到撰文系统。</p>
         </div>
@@ -387,30 +469,38 @@ function LoginScreen({ loading, message, onLogin }: { loading: boolean; message:
   );
 }
 
-function Dashboard({ inventory }: { inventory: InventoryResponse }) {
-  const lowCells = inventory.matrix.filter(cell => cell.available <= 1);
+function Dashboard({
+  inventory,
+  isAdmin,
+  onOpenArticles
+}: {
+  inventory: InventoryResponse;
+  isAdmin: boolean;
+  onOpenArticles: (focus: LibraryFocus) => void;
+}) {
+  const lowCells = inventory.matrix.filter(cell => matrixCellRemaining(cell) < 2);
   return (
     <>
       <div className="metrics">
         <Metric label="定稿库存" value={inventory.totals.articles} caption="已同步到发布系统" />
         <Metric label="可使用" value={inventory.totals.available} caption="未发布且未采购中" tone="good" />
         <Metric label="采购中" value={inventory.totals.purchasing} caption="等待网媒回填" tone="warn" />
-        <Metric label="已发布使用" value={inventory.totals.published} caption="计入消耗反馈" tone="brand" />
+        <Metric label={isAdmin ? "已发布使用" : "我的已发布"} value={inventory.totals.published} caption={isAdmin ? "计入消耗反馈" : "本人已录入发布"} tone="brand" />
       </div>
-      <section className="panel">
+      <section className="panel matrix-panel">
         <div className="panel-head">
-          <div><h2>关键词 × 文章类型库存</h2><p>可用量为未发布且未进入采购的定稿文章；已发布和采购中都会占用库存。</p></div>
+          <div><h2>关键词 × 文章类型库存</h2><p>{isAdmin ? "按定稿、已使用和采购中统计；当定稿减已使用不足 2 篇时提示补产。" : "按本人可见文章统计定稿、已使用和采购中；当定稿减已使用不足 2 篇时提示补产。"}</p></div>
           <span className="badge warn">{lowCells.length} 个低库存位</span>
         </div>
-        <MatrixTable cells={inventory.matrix} />
+        <MatrixTable cells={inventory.matrix} onOpenArticles={onOpenArticles} />
       </section>
-      <section className="panel">
-        <div className="panel-head"><div><h2>补产信号</h2><p>剩余 0 或 1 篇的关键词类型建议回到撰文系统补产。</p></div></div>
+      <section className="panel signal-panel">
+        <div className="panel-head"><div><h2>补产信号</h2><p>定稿减已使用剩余 0 或 1 篇的关键词类型建议回到撰文系统补产。</p></div></div>
         <div className="signal-list">
           {lowCells.length ? lowCells.map(cell => (
             <div className="signal" key={`${cell.keyword}-${cell.article_type}`}>
               <strong>{cell.keyword}</strong>
-              <span>{cell.article_type} · 可用 {cell.available} · 已发布 {cell.published} · 采购中 {cell.purchasing}</span>
+              <span>{cell.article_type} · 定稿 {cell.total} · 已使用 {cell.published} · 采购中 {cell.purchasing}</span>
             </div>
           )) : <div className="empty-inline">暂无低库存信号</div>}
         </div>
@@ -419,7 +509,13 @@ function Dashboard({ inventory }: { inventory: InventoryResponse }) {
   );
 }
 
-function MatrixTable({ cells }: { cells: MatrixCell[] }) {
+function MatrixTable({
+  cells,
+  onOpenArticles
+}: {
+  cells: MatrixCell[];
+  onOpenArticles: (focus: LibraryFocus) => void;
+}) {
   const keywords = unique(cells.map(cell => cell.keyword));
   const types = unique(cells.map(cell => cell.article_type));
   const map = new Map(cells.map(cell => [`${cell.keyword}\u0001${cell.article_type}`, cell]));
@@ -436,10 +532,15 @@ function MatrixTable({ cells }: { cells: MatrixCell[] }) {
                 return (
                   <td key={type}>
                     {cell ? (
-                      <div className={`stock ${cell.available === 0 ? "danger" : cell.available <= 1 ? "warn" : ""}`}>
-                        <strong>{cell.available} 可用</strong>
-                        <span>{cell.published} 已发布 · {cell.purchasing} 采购中</span>
-                      </div>
+                      <button
+                        className={`stock stock-button ${matrixCellTone(cell)}`.trim()}
+                        type="button"
+                        title={`查看文章库：${keyword} / ${type}`}
+                        onClick={() => onOpenArticles({ keyword, articleType: type })}
+                      >
+                        <strong>{cell.total} 定稿</strong>
+                        <span>{cell.published} 已使用 · {cell.purchasing} 采购中</span>
+                      </button>
                     ) : <span className="muted">暂无</span>}
                   </td>
                 );
@@ -452,13 +553,28 @@ function MatrixTable({ cells }: { cells: MatrixCell[] }) {
   );
 }
 
+function matrixCellRemaining(cell: MatrixCell): number {
+  return cell.total - cell.published;
+}
+
+function matrixCellTone(cell: MatrixCell): "danger" | "warn" | "" {
+  const remaining = matrixCellRemaining(cell);
+  if (remaining === 0) return "danger";
+  if (remaining < 2) return "warn";
+  return "";
+}
+
 function ArticleLibrary({
   inventory,
+  focus,
+  onClearFocus,
   onPreview,
   onSelf,
   onWeb
 }: {
   inventory: InventoryResponse;
+  focus: LibraryFocus | null;
+  onClearFocus: () => void;
   onPreview: (article: ArticleSnapshot) => void;
   onSelf: (article: ArticleSnapshot) => void;
   onWeb: (article: ArticleSnapshot) => void;
@@ -467,6 +583,13 @@ function ArticleLibrary({
   const [keywordFilter, setKeywordFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  useEffect(() => {
+    if (!focus) return;
+    setQuery("");
+    setKeywordFilter(focus.keyword);
+    setTypeFilter(focus.articleType);
+    setStatusFilter("");
+  }, [focus]);
   const keywordOptions = unique(inventory.articles.map(article => article.keyword || "未标注关键词"));
   const typeOptions = unique(inventory.articles.map(article => article.article_type || "未标注类型"));
   const statusOptions = unique(inventory.articles.map(article => article.inventory_status || "可使用"));
@@ -524,6 +647,7 @@ function ArticleLibrary({
             setKeywordFilter("");
             setTypeFilter("");
             setStatusFilter("");
+            onClearFocus();
           }}><RefreshCw size={15} />重置</button>
           <span className="filter-summary">{filtered.length} / {inventory.articles.length} 篇</span>
         </div>
@@ -599,10 +723,38 @@ function PublishedSites({ records }: { records: PublicationRecord[] }) {
   );
 }
 
-function Records({ records, isAdmin, onComplete }: { records: PublicationRecord[]; isAdmin: boolean; onComplete: (record: PublicationRecord) => void }) {
+function AIPlatformChips({ platforms }: { platforms?: string[] }) {
+  const visiblePlatforms = (platforms || []).filter(Boolean);
+  if (!visiblePlatforms.length) return <>-</>;
+  return (
+    <div className="ai-chip-list">
+      {visiblePlatforms.map(platform => <span className="ai-chip" key={platform}>{platform}</span>)}
+    </div>
+  );
+}
+
+function Records({
+  records,
+  isAdmin,
+  currentUser,
+  onComplete,
+  onEditSelf,
+  onEditWeb,
+  onDelete
+}: {
+  records: PublicationRecord[];
+  isAdmin: boolean;
+  currentUser: User;
+  onComplete: (record: PublicationRecord) => void;
+  onEditSelf: (record: PublicationRecord) => void;
+  onEditWeb: (record: PublicationRecord) => void;
+  onDelete: (record: PublicationRecord) => void;
+}) {
   const [query, setQuery] = useState("");
   const [keywordFilter, setKeywordFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [channelFilter, setChannelFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
   const [employeeFilter, setEmployeeFilter] = useState("");
   const keywordOptions = unique(records.map(record => record.keyword || "未标注关键词"));
@@ -629,28 +781,31 @@ function Records({ records, isAdmin, onComplete }: { records: PublicationRecord[
       record.employee_name,
       record.publish_url,
       record.reference_url,
+      ...(record.target_ai_platforms || []),
       statusLabel(record.order_status),
     ].join(" ").toLowerCase();
     return (!normalizedQuery || searchable.includes(normalizedQuery))
       && (!keywordFilter || keyword === keywordFilter)
       && (!typeFilter || articleType === typeFilter)
-      && (!dateFilter || isWithinDateFilter(recordDate, dateFilter))
+      && (!channelFilter || recordChannelGroup(record) === channelFilter)
+      && (!statusFilter || record.order_status === statusFilter)
+      && (!dateFilter || recordDate === dateFilter)
       && (!employeeFilter || employee === employeeFilter);
   });
   const grouped = groupBy(filtered, record => `${record.keyword || "未标注关键词"}\u0001${record.article_type || "未标注类型"}`);
-  const hasFilters = Boolean(query || keywordFilter || typeFilter || dateFilter || employeeFilter);
+  const hasFilters = Boolean(query || keywordFilter || typeFilter || channelFilter || statusFilter || dateFilter || employeeFilter);
   return (
     <div className="records-page">
       <div className="metrics record-metrics">
-        <Metric label="已发布链接" value={publishedCount} caption="一个站点一条记录" />
-        <Metric label="采购中" value={purchasingCount} caption="等待媒体采购系统回传" tone="warn" />
-        <Metric label="自营发布" value={selfPublishedCount} caption="员工录入发布链接" tone="good" />
+        <Metric label={isAdmin ? "已发布链接" : "我的已发布链接"} value={publishedCount} caption="一个站点一条记录" />
+        <Metric label={isAdmin ? "采购中" : "我的采购中"} value={purchasingCount} caption="等待媒体采购系统回传" tone="warn" />
+        <Metric label={isAdmin ? "自营发布" : "我的自营发布"} value={selfPublishedCount} caption={isAdmin ? "员工录入发布链接" : "本人录入发布链接"} tone="good" />
         <Metric label="已发布媒体成本" value={formatMoney(publishedWebCost)} caption="仅发布完成后产生" tone="brand" />
       </div>
 
-      <section className="record-filter-card">
+      <section className={`record-filter-card ${isAdmin ? "admin-record-filter" : "user-record-filter"}`}>
         <div className="toolbar">
-          <label className="search"><Search size={15} /><input value={query} placeholder="搜索文章、关键词、媒体或链接" onChange={event => setQuery(event.target.value)} /></label>
+          <label className="search"><Search size={15} /><input value={query} placeholder={isAdmin ? "搜索文章、关键词、媒体或链接" : "搜索我的文章、关键词、媒体或链接"} onChange={event => setQuery(event.target.value)} /></label>
           <select className="filter-select" value={keywordFilter} onChange={event => setKeywordFilter(event.target.value)}>
             <option value="">全部关键词</option>
             {keywordOptions.map(keyword => <option key={keyword} value={keyword}>{keyword}</option>)}
@@ -659,27 +814,39 @@ function Records({ records, isAdmin, onComplete }: { records: PublicationRecord[
             <option value="">全部文章类型</option>
             {typeOptions.map(articleType => <option key={articleType} value={articleType}>{articleType}</option>)}
           </select>
-          <select className="filter-select compact" value={dateFilter} onChange={event => setDateFilter(event.target.value)}>
-            <option value="">全部日期</option>
-            <option value="today">今天</option>
-            <option value="7d">近7天</option>
-            <option value="30d">近30天</option>
+          <select className="filter-select" value={channelFilter} onChange={event => setChannelFilter(event.target.value)}>
+            <option value="">全部渠道</option>
+            <option value="self">自营</option>
+            <option value="web">网媒</option>
           </select>
+          <select className="filter-select" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>
+            <option value="">全部状态</option>
+            <option value="published">已发布</option>
+            <option value="purchasing">采购中</option>
+          </select>
+          <input
+            className="filter-select compact filter-date"
+            type="date"
+            aria-label="选择发布日期"
+            value={dateFilter}
+            onChange={event => setDateFilter(event.target.value)}
+          />
           {isAdmin && (
             <select className="filter-select compact" value={employeeFilter} onChange={event => setEmployeeFilter(event.target.value)}>
               <option value="">全部员工</option>
               {employeeOptions.map(employee => <option key={employee} value={employee}>{employee}</option>)}
             </select>
           )}
-          {hasFilters && (
-            <button className="text-btn" onClick={() => {
-              setQuery("");
-              setKeywordFilter("");
-              setTypeFilter("");
-              setDateFilter("");
-              setEmployeeFilter("");
-            }}>重置筛选</button>
-          )}
+          <button className="text-btn reset-filter-btn" aria-hidden={!hasFilters} tabIndex={hasFilters ? 0 : -1} onClick={() => {
+            if (!hasFilters) return;
+            setQuery("");
+            setKeywordFilter("");
+            setTypeFilter("");
+            setChannelFilter("");
+            setStatusFilter("");
+            setDateFilter("");
+            setEmployeeFilter("");
+          }}>重置筛选</button>
           <span className="filter-summary">{filtered.length} / {records.length} 条</span>
         </div>
       </section>
@@ -697,12 +864,13 @@ function Records({ records, isAdmin, onComplete }: { records: PublicationRecord[
                     <col className="record-col-title" />
                     <col className="record-col-channel" />
                     <col className="record-col-media" />
+                    <col className="record-col-ai" />
                     <col className="record-col-status" />
                     <col className="record-col-cost" />
                     <col className="record-col-link" />
                     <col className="record-col-action" />
                   </colgroup>
-                  <thead><tr><th>日期</th><th>文章</th><th>渠道</th><th>媒体</th><th>状态</th><th>实际成本</th><th>发布链接</th><th>操作</th></tr></thead>
+                  <thead><tr><th>日期</th><th>文章</th><th>渠道</th><th>媒体</th><th>关联AI</th><th>状态</th><th>实际成本</th><th>发布链接</th><th>操作</th></tr></thead>
                   <tbody>
                     {rows.map(record => (
                       <tr key={record.id}>
@@ -710,10 +878,21 @@ function Records({ records, isAdmin, onComplete }: { records: PublicationRecord[
                         <td><strong>{record.title || record.article_id}</strong></td>
                         <td>{record.channel_type || "-"}</td>
                         <td>{record.media_name || "-"}</td>
+                        <td><AIPlatformChips platforms={record.target_ai_platforms} /></td>
                         <td><span className={`badge ${record.order_status === "published" ? "good" : "warn"}`}>{statusLabel(record.order_status)}</span></td>
                         <td>{record.actual_cost ? formatMoney(record.actual_cost) : "-"}</td>
                         <td>{record.publish_url ? <a href={record.publish_url} target="_blank" rel="noreferrer">打开链接 <ExternalLink size={12} /></a> : "等待回填"}</td>
-                        <td>{isAdmin && record.order_status === "purchasing" ? <button className="text-btn" onClick={() => onComplete(record)}>回填</button> : "-"}</td>
+                        <td>
+                          <RecordActions
+                            record={record}
+                            isAdmin={isAdmin}
+                            currentUser={currentUser}
+                            onComplete={onComplete}
+                            onEditSelf={onEditSelf}
+                            onEditWeb={onEditWeb}
+                            onDelete={onDelete}
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -722,9 +901,42 @@ function Records({ records, isAdmin, onComplete }: { records: PublicationRecord[
             </section>
           );
         })}
-        {!records.length && <div className="empty-panel">暂无发布记录</div>}
-        {Boolean(records.length) && !filtered.length && <div className="empty-panel">没有符合条件的发布记录</div>}
+        {!records.length && <div className="empty-panel">{isAdmin ? "暂无发布记录" : "暂无我的发布记录"}</div>}
+        {Boolean(records.length) && !filtered.length && <div className="empty-panel">{isAdmin ? "没有符合条件的发布记录" : "没有符合条件的我的发布记录"}</div>}
       </div>
+    </div>
+  );
+}
+
+function RecordActions({
+  record,
+  isAdmin,
+  currentUser,
+  onComplete,
+  onEditSelf,
+  onEditWeb,
+  onDelete
+}: {
+  record: PublicationRecord;
+  isAdmin: boolean;
+  currentUser: User;
+  onComplete: (record: PublicationRecord) => void;
+  onEditSelf: (record: PublicationRecord) => void;
+  onEditWeb: (record: PublicationRecord) => void;
+  onDelete: (record: PublicationRecord) => void;
+}) {
+  const canDelete = isAdmin || record.employee_id === currentUser.id;
+  const selfChannel = isSelfChannel(record.channel_type);
+  const canEditSelf = selfChannel && canDelete;
+  const canEditWeb = isAdmin && !selfChannel && record.order_status === "published";
+  const canComplete = isAdmin && !selfChannel && record.order_status === "purchasing";
+  if (!canEditSelf && !canEditWeb && !canComplete && !canDelete) return <>-</>;
+  return (
+    <div className="record-actions">
+      {canEditSelf && <button className="text-btn" onClick={() => onEditSelf(record)}>修改</button>}
+      {canEditWeb && <button className="text-btn" onClick={() => onEditWeb(record)}>修改</button>}
+      {canComplete && <button className="text-btn" onClick={() => onComplete(record)}>回填</button>}
+      {canDelete && <button className="text-btn danger" onClick={() => onDelete(record)}>撤销</button>}
     </div>
   );
 }
@@ -745,10 +957,11 @@ function WorkLog({
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [query, setQuery] = useState("");
   const [employeeFilter, setEmployeeFilter] = useState("");
+  const [selectedDay, setSelectedDay] = useState("");
   const selectedProject = projects.find(project => project.project_id === projectId);
   const employeeOptions = unique(records.map(record => record.employee_name || "未标注员工"));
   const normalizedQuery = query.trim().toLowerCase();
-  const filtered = records.filter(record => {
+  const monthFiltered = records.filter(record => {
     const employee = record.employee_name || "未标注员工";
     const recordDate = recordDateLabel(record);
     const searchable = [
@@ -764,29 +977,35 @@ function WorkLog({
       && recordDate.startsWith(month)
       && (!employeeFilter || employee === employeeFilter);
   });
+  const filtered = selectedDay ? monthFiltered.filter(record => recordDateLabel(record) === selectedDay) : monthFiltered;
   const dayCount = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
-  const counts = Array.from({ length: dayCount }, (_, index) => {
+  const dayStats = Array.from({ length: dayCount }, (_, index) => {
     const day = `${month}-${String(index + 1).padStart(2, "0")}`;
-    return filtered.filter(record => recordDateLabel(record) === day).length;
+    return {
+      date: day,
+      dayNumber: index + 1,
+      count: monthFiltered.filter(record => recordDateLabel(record) === day).length
+    };
   });
+  const counts = dayStats.map(day => day.count);
   const max = Math.max(...counts, 1);
   const participantCount = unique(filtered.map(record => record.employee_name || "未标注员工")).length;
   const selfPublishedCount = filtered.filter(record => record.order_status === "published" && isSelfChannel(record.channel_type)).length;
   const webPublishedCount = filtered.filter(record => record.order_status === "published" && !isSelfChannel(record.channel_type)).length;
-  const hasFilters = Boolean(query || employeeFilter || month !== new Date().toISOString().slice(0, 7));
+  const hasFilters = Boolean(query || employeeFilter || selectedDay || month !== new Date().toISOString().slice(0, 7));
   return (
     <div className="work-log-page">
       <div className="metrics record-metrics">
-        <Metric label="发布记录数" value={filtered.length} caption="当前筛选下的记录" />
-        <Metric label="参与员工" value={participantCount} caption="涉及发布或采购的员工" tone="brand" />
-        <Metric label="自营发布" value={selfPublishedCount} caption="已发布的自媒体记录" tone="good" />
-        <Metric label="网媒发布" value={webPublishedCount} caption="已发布的网媒记录" tone="warn" />
+        <Metric label={isAdmin ? "发布记录数" : "我的发布记录数"} value={filtered.length} caption="当前筛选下的记录" />
+        <Metric label={isAdmin ? "参与员工" : "记录员工"} value={isAdmin ? participantCount : Math.min(participantCount, filtered.length ? 1 : 0)} caption={isAdmin ? "涉及发布或采购的员工" : "仅显示当前账号"} tone="brand" />
+        <Metric label={isAdmin ? "自营发布" : "我的自营发布"} value={selfPublishedCount} caption="已发布的自媒体记录" tone="good" />
+        <Metric label={isAdmin ? "网媒发布" : "我的网媒发布"} value={webPublishedCount} caption="已发布的网媒记录" tone="warn" />
       </div>
 
       <section className="record-filter-card">
         <div className="work-log-filters">
           <div className="work-log-filter-row primary">
-            <label className="search"><Search size={15} /><input value={query} placeholder="搜索文章、关键词、媒体或员工" onChange={event => setQuery(event.target.value)} /></label>
+            <label className="search"><Search size={15} /><input value={query} placeholder={isAdmin ? "搜索文章、关键词、媒体或员工" : "搜索我的文章、关键词或媒体"} onChange={event => setQuery(event.target.value)} /></label>
             {isAdmin && (
               <select className="filter-select project-filter" value={projectId} onChange={event => onProjectChange(event.target.value)}>
                 {projects.length ? projects.map(project => (
@@ -794,7 +1013,10 @@ function WorkLog({
                 )) : <option value="">暂无项目</option>}
               </select>
             )}
-            <input className="filter-select month-filter" type="month" value={month} onChange={event => setMonth(event.target.value)} />
+            <input className="filter-select month-filter" type="month" value={month} onChange={event => {
+              setMonth(event.target.value);
+              setSelectedDay("");
+            }} />
             {isAdmin && (
               <select className="filter-select employee-filter" value={employeeFilter} onChange={event => setEmployeeFilter(event.target.value)}>
                 <option value="">全部员工</option>
@@ -808,6 +1030,7 @@ function WorkLog({
                   setMonth(new Date().toISOString().slice(0, 7));
                   setQuery("");
                   setEmployeeFilter("");
+                  setSelectedDay("");
                 }}>重置筛选</button>
               )}
             </div>
@@ -817,23 +1040,39 @@ function WorkLog({
 
       <section className="panel">
         <div className="panel-head">
-          <div><h2>月度文章发布数量</h2><p>{selectedProject ? `日志项目：${selectedProject.project_name} · ` : ""}根据当前筛选条件统计 {month} 的工作量。</p></div>
+          <div><h2>{isAdmin ? "月度文章发布数量" : "我的月度文章发布数量"}</h2><p>{selectedProject ? `日志项目：${selectedProject.project_name} · ` : ""}根据当前筛选条件统计 {month} 的工作量。</p></div>
         </div>
         <div className="month-chart">
-          {counts.map((count, index) => (
-            <div className="day" key={index} tabIndex={0} aria-label={`${index + 1} 日发布 ${count} 篇`}>
+          {dayStats.map(day => (
+            <button
+              className={`day ${selectedDay === day.date ? "is-selected" : ""}`}
+              key={day.date}
+              type="button"
+              aria-pressed={selectedDay === day.date}
+              aria-label={`${day.dayNumber} 日发布 ${day.count} 篇，点击查看当天明细`}
+              onClick={() => setSelectedDay(current => current === day.date ? "" : day.date)}
+            >
               <div className="day-bar">
-                <span style={{ height: `${(count / max) * 100}%` }} />
-                <em>{Number(month.slice(5, 7))}月{index + 1}日 · {count} 篇发布</em>
+                <span style={{ height: `${(day.count / max) * 100}%` }} />
+                <em>{Number(month.slice(5, 7))}月{day.dayNumber}日 · {day.count} 篇发布</em>
               </div>
-              <small>{index + 1}</small>
-            </div>
+              <small>{day.dayNumber}</small>
+            </button>
           ))}
         </div>
       </section>
 
       <section className="record-group">
-        <header><strong>工作日志明细</strong><span>{filtered.length} 条记录</span></header>
+        <header>
+          <div className="record-group-title">
+            <strong>{isAdmin ? "工作日志明细" : "我的工作日志明细"}</strong>
+            {selectedDay && <small>已筛选：{selectedDay}</small>}
+          </div>
+          <div className="record-group-actions">
+            {selectedDay && <button className="text-btn" type="button" onClick={() => setSelectedDay("")}>清除日期</button>}
+            <span>{filtered.length} 条记录</span>
+          </div>
+        </header>
         <div className="table-wrap work-log-table-wrap">
           {filtered.length ? <table className="record-table work-log-table">
             <colgroup>
@@ -863,8 +1102,8 @@ function WorkLog({
             </tbody>
           </table> : null}
         </div>
-        {!records.length && <div className="empty-panel">暂无工作日志记录</div>}
-        {Boolean(records.length) && !filtered.length && <div className="empty-panel">没有符合条件的工作日志</div>}
+        {!records.length && <div className="empty-panel">{isAdmin ? "暂无工作日志记录" : "暂无我的工作日志记录"}</div>}
+        {Boolean(records.length) && !filtered.length && <div className="empty-panel">{isAdmin ? "没有符合条件的工作日志" : "没有符合条件的我的工作日志"}</div>}
       </section>
     </div>
   );
@@ -890,7 +1129,10 @@ function AdminPanel({
   const [syncProjectId, setSyncProjectId] = useState(writingProjects[0]?.id || "");
   const [newUser, setNewUser] = useState<{ username: string; password: string; display_name: string; role: Role }>({ username: "", password: "", display_name: "", role: "employee" });
   const [showCreateUser, setShowCreateUser] = useState(false);
-  const [assignment, setAssignment] = useState({ user_id: "", project_id: projects[0]?.project_id || "", keywords: "", article_types: "" });
+  const [assignment, setAssignment] = useState<AssignmentDraft>({ user_id: "", project_id: projects[0]?.project_id || "", keywords: [], article_types: [] });
+  const [assignmentOptions, setAssignmentOptions] = useState<AssignmentOptions>({ keywords: [], articleTypes: [] });
+  const [assignmentOptionsLoading, setAssignmentOptionsLoading] = useState(false);
+  const [assignmentOptionsError, setAssignmentOptionsError] = useState("");
   const selectedWritingProject = writingProjects.find(project => project.id === syncProjectId);
   const syncedProjectById = new Map(projects.map(project => [project.project_id, project]));
   const syncedProjectNameById = new Map(projects.map(project => [project.project_id, project.project_name]));
@@ -904,6 +1146,37 @@ function AdminPanel({
   useEffect(() => {
     if (!assignment.project_id && projects[0]) setAssignment(current => ({ ...current, project_id: projects[0].project_id }));
   }, [projects]);
+
+  useEffect(() => {
+    if (!assignment.project_id) {
+      setAssignmentOptions({ keywords: [], articleTypes: [] });
+      setAssignmentOptionsError("");
+      return;
+    }
+    let cancelled = false;
+    setAssignmentOptions({ keywords: [], articleTypes: [] });
+    setAssignmentOptionsLoading(true);
+    setAssignmentOptionsError("");
+    void api.inventory(assignment.project_id)
+      .then(response => {
+        if (cancelled) return;
+        setAssignmentOptions({
+          keywords: unique(response.articles.map(article => article.keyword || "未标注关键词")),
+          articleTypes: unique(response.articles.map(article => article.article_type || "未标注类型"))
+        });
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setAssignmentOptions({ keywords: [], articleTypes: [] });
+        setAssignmentOptionsError(error instanceof Error ? error.message : "候选项加载失败，可手动输入。");
+      })
+      .finally(() => {
+        if (!cancelled) setAssignmentOptionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [assignment.project_id]);
 
   return (
     <div className="admin-grid">
@@ -965,19 +1238,32 @@ function AdminPanel({
             <option value="">选择已同步项目</option>
             {projects.map(project => <option key={project.project_id} value={project.project_id}>{project.project_name}</option>)}
           </select>
-          <input value={assignment.keywords} placeholder="关键词，逗号或换行分隔" onChange={event => setAssignment({ ...assignment, keywords: event.target.value })} />
-          <input value={assignment.article_types} placeholder="文章类型，逗号或换行分隔" onChange={event => setAssignment({ ...assignment, article_types: event.target.value })} />
+          <MultiValueInput
+            value={assignment.keywords}
+            options={assignmentOptions.keywords}
+            placeholder={assignmentOptionsLoading ? "正在加载关键词候选..." : "选择或输入关键词"}
+            emptyText={assignment.project_id ? "暂无关键词候选，可手动输入" : "请先选择项目"}
+            onChange={keywords => setAssignment({ ...assignment, keywords })}
+          />
+          <MultiValueInput
+            value={assignment.article_types}
+            options={assignmentOptions.articleTypes}
+            placeholder={assignmentOptionsLoading ? "正在加载文章类型候选..." : "选择或输入文章类型"}
+            emptyText={assignment.project_id ? "暂无文章类型候选，可手动输入" : "请先选择项目"}
+            onChange={articleTypes => setAssignment({ ...assignment, article_types: articleTypes })}
+          />
           <button className="btn primary admin-action-btn" onClick={() => void run(async () => {
             await api.createAssignment({
               user_id: assignment.user_id,
               project_id: assignment.project_id,
-              keywords: splitList(assignment.keywords),
-              article_types: splitList(assignment.article_types)
+              keywords: assignment.keywords,
+              article_types: assignment.article_types
             });
-            setAssignment({ ...assignment, keywords: "", article_types: "" });
+            setAssignment({ ...assignment, keywords: [], article_types: [] });
             await reload();
           }, "负责板块已分配。")}>保存分配</button>
         </div>
+        {assignmentOptionsError && <div className="assignment-options-error">{assignmentOptionsError}</div>}
         <div className="table-wrap">
           <table>
             <thead><tr><th>员工</th><th>项目</th><th>关键词</th><th>文章类型</th><th>操作</th></tr></thead>
@@ -1006,6 +1292,112 @@ function AdminPanel({
           }}
           run={run}
         />
+      )}
+    </div>
+  );
+}
+
+function MultiValueInput({
+  value,
+  options,
+  placeholder,
+  emptyText,
+  onChange
+}: {
+  value: string[];
+  options: string[];
+  placeholder: string;
+  emptyText: string;
+  onChange: (next: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [open, setOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selected = new Set(value);
+
+  function addItems(raw: string) {
+    const items = splitList(raw);
+    if (!items.length) return;
+    onChange(unique([...value, ...items]));
+    setDraft("");
+  }
+
+  function removeItem(target: string) {
+    onChange(value.filter(item => item !== target));
+  }
+
+  function toggleOption(option: string) {
+    if (selected.has(option)) {
+      removeItem(option);
+      return;
+    }
+    onChange(unique([...value, option]));
+    setDraft("");
+  }
+
+  return (
+    <div
+      className={`multi-value-input ${open ? "is-open" : ""}`}
+      onBlur={event => {
+        const nextTarget = event.relatedTarget as Node | null;
+        if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+        addItems(draft);
+        setOpen(false);
+      }}
+    >
+      <div className="multi-value-box" onClick={() => {
+        setOpen(true);
+        inputRef.current?.focus();
+      }}>
+        {value.map(item => (
+          <button className="multi-value-tag" type="button" key={item} onClick={() => removeItem(item)} title="点击移除">
+            <span>{item}</span>
+            <X size={12} />
+          </button>
+        ))}
+        <input
+          ref={inputRef}
+          value={draft}
+          placeholder={value.length ? "继续输入" : placeholder}
+          onChange={event => setDraft(event.target.value)}
+          onFocus={() => setOpen(true)}
+          onKeyDown={event => {
+            if (["Enter", ",", "，"].includes(event.key)) {
+              event.preventDefault();
+              addItems(draft);
+            }
+            if (event.key === "Backspace" && !draft && value.length) {
+              removeItem(value[value.length - 1]);
+            }
+          }}
+          onPaste={event => {
+            const text = event.clipboardData.getData("text");
+            if (!/[,\n，、]/.test(text)) return;
+            event.preventDefault();
+            addItems(text);
+          }}
+        />
+      </div>
+      {open && (
+        <div className="multi-value-dropdown">
+          {options.length ? options.map(option => {
+            const checked = selected.has(option);
+            return (
+              <button
+                type="button"
+                className={`multi-value-option ${checked ? "is-selected" : ""}`}
+                key={option}
+                onMouseDown={event => event.preventDefault()}
+                onClick={() => toggleOption(option)}
+                role="checkbox"
+                aria-checked={checked}
+              >
+                <span className="multi-value-check">{checked && <CheckCircle2 size={13} />}</span>
+                <span>{option}</span>
+              </button>
+            );
+          }) : <span className="multi-value-empty">{emptyText}</span>}
+        </div>
       )}
     </div>
   );
@@ -1220,6 +1612,7 @@ function SelfPublicationModal({ article, options, onClose, onSubmit }: { article
 function WebPublicationModal({ article, options, onClose, onSubmit }: { article: ArticleSnapshot; options: Options; onClose: () => void; onSubmit: (payload: Record<string, unknown>) => Promise<void> }) {
   const [mediaCategory, setMediaCategory] = useState(options.web_categories[0] || "");
   const [mediaName, setMediaName] = useState("");
+  const [publisher, setPublisher] = useState("");
   const [referenceUrl, setReferenceUrl] = useState("");
   const [ai, setAi] = useState<string[]>([]);
   const [note, setNote] = useState("");
@@ -1229,7 +1622,7 @@ function WebPublicationModal({ article, options, onClose, onSubmit }: { article:
     setError("");
     setSubmitting(true);
     try {
-      await onSubmit({ article_id: article.article_id, media_category: mediaCategory, media_name: mediaName, reference_url: referenceUrl, target_ai_platforms: ai, note });
+      await onSubmit({ article_id: article.article_id, media_category: mediaCategory, media_name: mediaName, publisher, reference_url: referenceUrl, target_ai_platforms: ai, note });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "发送失败。");
     } finally {
@@ -1241,7 +1634,8 @@ function WebPublicationModal({ article, options, onClose, onSubmit }: { article:
       {error && <div className="modal-error">{error}</div>}
       <div className="flow-note">网媒记录会先进入采购中；实际媒体、成本和发布链接由管理员回填后才计入发布量。</div>
       <FormSelect label="媒体分类" value={mediaCategory} onChange={setMediaCategory} options={options.web_categories} />
-      <FormInput label="期望媒体名称或要求" value={mediaName} onChange={setMediaName} placeholder="例如：家居行业垂直媒体" />
+      <FormInput label="发布渠道" value={mediaName} onChange={setMediaName} placeholder="例如：家居行业垂直媒体" />
+      <FormInput label="发稿方" value={publisher} onChange={setPublisher} placeholder="例如：供应商或发稿联系人" />
       <FormInput label="参考链接" value={referenceUrl} onChange={setReferenceUrl} placeholder="https://..." />
       <SectionTitle title="关联 AI 平台" />
       <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
@@ -1254,18 +1648,19 @@ function WebPublicationModal({ article, options, onClose, onSubmit }: { article:
   );
 }
 
-function CompleteWebModal({ record, onClose, onSubmit }: { record: PublicationRecord; onClose: () => void; onSubmit: (payload: Record<string, unknown>) => Promise<void> }) {
+function CompleteWebModal({ record, options, onClose, onSubmit }: { record: PublicationRecord; options: Options; onClose: () => void; onSubmit: (payload: Record<string, unknown>) => Promise<void> }) {
   const [mediaName, setMediaName] = useState(record.media_name.replace(/^待采购确认：/, ""));
   const [publishUrl, setPublishUrl] = useState("");
   const [actualCost, setActualCost] = useState("0");
   const [orderId, setOrderId] = useState("");
+  const [ai, setAi] = useState<string[]>(record.target_ai_platforms || []);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   async function submit() {
     setError("");
     setSubmitting(true);
     try {
-      await onSubmit({ media_name: mediaName, publish_url: publishUrl, actual_cost: Number(actualCost), order_id: orderId, order_status: "published" });
+      await onSubmit({ media_name: mediaName, publish_url: publishUrl, actual_cost: Number(actualCost), order_id: orderId, target_ai_platforms: ai, order_status: "published" });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "回填失败。");
     } finally {
@@ -1279,9 +1674,156 @@ function CompleteWebModal({ record, onClose, onSubmit }: { record: PublicationRe
       <FormInput label="发布链接" value={publishUrl} onChange={setPublishUrl} placeholder="https://..." />
       <FormInput label="实际成本" value={actualCost} onChange={setActualCost} placeholder="0" />
       <FormInput label="订单号" value={orderId} onChange={setOrderId} placeholder="可选" />
+      <SectionTitle title="关联 AI 平台" />
+      <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
       <div className="modal-actions">
         <button className="btn" onClick={onClose}>取消</button>
         <button className="btn primary" disabled={submitting} onClick={() => void submit()}>{submitting ? <Loader2 className="spin" size={15} /> : <CheckCircle2 size={15} />}确认发布</button>
+      </div>
+    </Modal>
+  );
+}
+
+function EditSelfPublicationModal({
+  record,
+  options,
+  onClose,
+  onSubmit
+}: {
+  record: PublicationRecord;
+  options: Options;
+  onClose: () => void;
+  onSubmit: (payload: Record<string, unknown>) => Promise<void>;
+}) {
+  const [mediaName, setMediaName] = useState(record.media_name || options.self_media[0] || "");
+  const [publishUrl, setPublishUrl] = useState(record.publish_url || "");
+  const [publishedAt, setPublishedAt] = useState((record.published_at || record.created_at || new Date().toISOString()).slice(0, 10));
+  const [ai, setAi] = useState<string[]>(record.target_ai_platforms || []);
+  const [note, setNote] = useState(record.note || "");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  async function submit() {
+    setError("");
+    setSubmitting(true);
+    try {
+      await onSubmit({ media_name: mediaName, publish_url: publishUrl, published_at: publishedAt, target_ai_platforms: ai, note });
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "修改失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return (
+    <Modal title="修改自营发布记录" subtitle={record.title || record.article_id} onClose={onClose}>
+      {error && <div className="modal-error">{error}</div>}
+      <SectionTitle title="自营发布信息" />
+      <RadioCardGrid options={options.self_media} value={mediaName} onChange={setMediaName} meta="自营" />
+      <SectionTitle title="关联优化 AI 平台" />
+      <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
+      <FormInput label="发布链接" value={publishUrl} onChange={setPublishUrl} placeholder="https://..." required />
+      <FormInput label="发布日期" type="date" value={publishedAt} onChange={setPublishedAt} />
+      <FormInput label="备注" value={note} onChange={setNote} placeholder="可选" />
+      <div className="modal-actions sticky">
+        <button className="btn" onClick={onClose}>取消</button>
+        <button className="btn primary" disabled={submitting} onClick={() => void submit()}>{submitting ? <Loader2 className="spin" size={15} /> : <Save size={15} />}保存修改</button>
+      </div>
+    </Modal>
+  );
+}
+
+function EditWebPublicationModal({
+  record,
+  options,
+  onClose,
+  onSubmit
+}: {
+  record: PublicationRecord;
+  options: Options;
+  onClose: () => void;
+  onSubmit: (payload: Record<string, unknown>) => Promise<void>;
+}) {
+  const [mediaName, setMediaName] = useState(record.media_name || "");
+  const [publishUrl, setPublishUrl] = useState(record.publish_url || "");
+  const [actualCost, setActualCost] = useState(String(record.actual_cost || 0));
+  const [orderId, setOrderId] = useState(record.order_id || "");
+  const [publishedAt, setPublishedAt] = useState((record.published_at || record.created_at || new Date().toISOString()).slice(0, 10));
+  const [ai, setAi] = useState<string[]>(record.target_ai_platforms || []);
+  const [note, setNote] = useState(record.note || "");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  async function submit() {
+    setError("");
+    setSubmitting(true);
+    try {
+      await onSubmit({
+        media_name: mediaName,
+        publish_url: publishUrl,
+        actual_cost: Number(actualCost),
+        order_id: orderId,
+        published_at: publishedAt,
+        target_ai_platforms: ai,
+        note,
+        order_status: "published"
+      });
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "修改失败。");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return (
+    <Modal title="修改网媒发布记录" subtitle={record.title || record.article_id} onClose={onClose}>
+      {error && <div className="modal-error">{error}</div>}
+      <SectionTitle title="网媒发布信息" />
+      <FormInput label="实际媒体名称" value={mediaName} onChange={setMediaName} required />
+      <FormInput label="发布链接" value={publishUrl} onChange={setPublishUrl} placeholder="https://..." required />
+      <FormInput label="实际成本" value={actualCost} onChange={setActualCost} placeholder="0" />
+      <FormInput label="订单号" value={orderId} onChange={setOrderId} placeholder="可选" />
+      <FormInput label="发布日期" type="date" value={publishedAt} onChange={setPublishedAt} />
+      <SectionTitle title="关联 AI 平台" />
+      <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
+      <FormInput label="备注" value={note} onChange={setNote} placeholder="可选" />
+      <div className="modal-actions sticky">
+        <button className="btn" onClick={onClose}>取消</button>
+        <button className="btn primary" disabled={submitting} onClick={() => void submit()}>{submitting ? <Loader2 className="spin" size={15} /> : <Save size={15} />}保存修改</button>
+      </div>
+    </Modal>
+  );
+}
+
+function DeletePublicationModal({
+  record,
+  onClose,
+  onConfirm
+}: {
+  record: PublicationRecord;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  async function submit() {
+    setError("");
+    setSubmitting(true);
+    try {
+      await onConfirm();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "撤销失败。");
+      setSubmitting(false);
+    }
+  }
+  return (
+    <Modal title="确认撤销发布记录？" subtitle={record.title || record.article_id} onClose={onClose}>
+      {error && <div className="modal-error">{error}</div>}
+      <div className="confirm-summary">
+        <strong>{record.media_name || "-"}</strong>
+        <span>{record.channel_type || "-"} · {statusLabel(record.order_status)} · {recordDateLabel(record)}</span>
+        {record.publish_url && <small>{record.publish_url}</small>}
+      </div>
+      <p className="danger-note">撤销后会删除这条发布记录，文章库存统计会重新计算。此操作不能在页面内恢复。</p>
+      <div className="modal-actions">
+        <button className="btn" disabled={submitting} onClick={onClose}>取消</button>
+        <button className="btn danger" disabled={submitting} onClick={() => void submit()}>{submitting ? <Loader2 className="spin" size={15} /> : <X size={15} />}确认撤销</button>
       </div>
     </Modal>
   );
@@ -1343,8 +1885,13 @@ function CheckboxCardGrid({ options, value, onChange }: { options: string[]; val
   );
 }
 
-function NavButton({ active, icon, label, onClick }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void }) {
-  return <button className={active ? "active" : ""} onClick={onClick}>{icon}{label}</button>;
+function NavButton({ active, icon, label, desc, onClick }: { active: boolean; icon: React.ReactNode; label: string; desc: string; onClick: () => void }) {
+  return (
+    <button className={active ? "active" : ""} onClick={onClick}>
+      {icon}
+      <span><strong>{label}</strong><small>{desc}</small></span>
+    </button>
+  );
 }
 
 function Metric({ label, value, caption, tone = "" }: { label: string; value: number | string; caption: string; tone?: string }) {
@@ -1417,22 +1964,12 @@ function recordDateLabel(record: PublicationRecord): string {
   return value.slice(0, 10) || "-";
 }
 
-function isWithinDateFilter(dateValue: string, filter: string): boolean {
-  if (!filter) return true;
-  if (!dateValue) return false;
-  const recordTime = new Date(`${dateValue}T00:00:00`).getTime();
-  if (Number.isNaN(recordTime)) return false;
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  if (filter === "today") return recordTime === todayStart;
-  const days = filter === "7d" ? 7 : filter === "30d" ? 30 : 0;
-  if (!days) return true;
-  const start = todayStart - (days - 1) * 24 * 60 * 60 * 1000;
-  return recordTime >= start && recordTime <= todayStart;
-}
-
 function isSelfChannel(channel: string): boolean {
   return ["自营", "自媒体", "self"].includes(channel);
+}
+
+function recordChannelGroup(record: PublicationRecord): "self" | "web" {
+  return isSelfChannel(record.channel_type) ? "self" : "web";
 }
 
 function formatMoney(value: number): string {

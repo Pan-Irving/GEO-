@@ -60,9 +60,12 @@ PDF_TABLE_STYLE = TableStyle(
 )
 
 
-def build_matrix_content_plan(project: Project) -> dict[str, Any]:
-    matrix_state = project.steps.get("matrix")
+def build_matrix_content_plan(project: Project, source: str = "matrix") -> dict[str, Any]:
+    source = normalize_content_plan_source(source)
+    matrix_state = project.steps.get(source)
     if not matrix_state or matrix_state.status not in {"completed", "confirmed"}:
+        if source == "demand_matrix":
+            raise ContentPlanError("请先生成需求驱动矩阵，再查看或导出内容规划。")
         raise ContentPlanError("请先生成内容矩阵，再查看或导出内容规划。")
     matrix_output = matrix_state.output or {}
     raw_items = matrix_output.get("items")
@@ -101,12 +104,15 @@ def build_matrix_content_plan(project: Project) -> dict[str, Any]:
     if content_plan_text_mentions_blocked_type(final_execution_advice):
         final_execution_advice = ""
     warnings = filter_content_plan_rows_without_blocked_text(normalize_text_rows(matrix_output.get("warnings")))
+    markdown_report = text_value(matrix_output.get("markdown_report")) if source == "demand_matrix" else ""
 
     plan = {
         "schema_version": CONTENT_PLAN_SCHEMA_VERSION,
+        "source": source,
         "project_id": project.id,
         "project_name": project.name,
         "generated_at": utc_now(),
+        "markdown_report": markdown_report,
         "summary": {
             "target_brand": text_value(first_by_keys(project_block, ["target_brand", "brand", "目标品牌"])),
             "target_product_or_solution": text_value(first_by_keys(project_block, ["target_product_or_solution", "target_product", "product", "目标产品", "目标方案"])),
@@ -128,6 +134,15 @@ def build_matrix_content_plan(project: Project) -> dict[str, Any]:
         "article_type_pool": article_type_pool,
         "first_round_plans": sorted_items,
         "shared_supporting_articles": shared_supporting_articles,
+        "demand_variables": normalize_text_rows(matrix_output.get("demand_variables")),
+        "keyword_variable_mapping": normalize_text_rows(matrix_output.get("keyword_variable_mapping")),
+        "content_theme_clusters": normalize_text_rows(matrix_output.get("content_theme_clusters")),
+        "title_angle_pool": normalize_text_rows(matrix_output.get("title_angle_pool")),
+        "weekly_publishing_mix": normalize_text_rows(matrix_output.get("weekly_publishing_mix")),
+        "monthly_publishing_mix": normalize_text_rows(matrix_output.get("monthly_publishing_mix")),
+        "daily_supplement_pool": normalize_text_rows(matrix_output.get("daily_supplement_pool")),
+        "ai_retest_rules": normalize_text_rows(matrix_output.get("ai_retest_rules")),
+        "anti_homogenization_requirements": normalize_text_rows(matrix_output.get("anti_homogenization_requirements")),
         "unified_recommendation_language": normalize_text_rows(matrix_output.get("unified_recommendation_language")),
         "evidence_gaps": evidence_gaps,
         "publishing_plan": publishing_plan,
@@ -140,10 +155,12 @@ def build_matrix_content_plan(project: Project) -> dict[str, Any]:
     return plan
 
 
-def export_content_plan_pdf(project: Project, repository: ProjectRepository) -> Any:
-    plan = build_matrix_content_plan(project)
+def export_content_plan_pdf(project: Project, repository: ProjectRepository, source: str = "matrix") -> Any:
+    source = normalize_content_plan_source(source)
+    plan = build_matrix_content_plan(project, source)
     pdf_bytes = render_content_plan_pdf(plan)
-    return repository.write_binary_output(project, "02-content-plan.pdf", pdf_bytes)
+    filename = "02-demand-content-plan.pdf" if source == "demand_matrix" else "02-content-plan.pdf"
+    return repository.write_binary_output(project, filename, pdf_bytes)
 
 
 def render_content_plan_pdf(plan: dict[str, Any]) -> bytes:
@@ -160,9 +177,15 @@ def render_content_plan_pdf(plan: dict[str, Any]) -> bytes:
     )
     styles = pdf_styles()
     story: list[Any] = []
-    story.append(Paragraph(pdf_escape(f"{plan.get('project_name', '项目')}｜GEO 内容规划报告"), styles["Title"]))
+    source_label = content_plan_source_label(str(plan.get("source") or "matrix"))
+    story.append(Paragraph(pdf_escape(f"{plan.get('project_name', '项目')}｜{source_label}报告"), styles["Title"]))
     story.append(Paragraph(pdf_escape(f"生成时间：{plan.get('generated_at', '')}"), styles["Muted"]))
     story.append(Spacer(1, 7))
+    markdown_report = text_value(plan.get("markdown_report"))
+    if plan.get("source") == "demand_matrix" and markdown_report:
+        add_markdown_report(story, styles, markdown_report)
+        doc.build(story, onFirstPage=pdf_footer, onLaterPages=pdf_footer)
+        return buffer.getvalue()
     add_project_summary(story, styles, plan)
     add_intent_groups(story, styles, plan)
     add_article_type_pool(story, styles, plan)
@@ -302,6 +325,41 @@ def add_heading(story: list[Any], styles: dict[str, ParagraphStyle], title: str)
     story.append(Spacer(1, 4))
 
 
+def add_markdown_report(story: list[Any], styles: dict[str, ParagraphStyle], markdown: str) -> None:
+    for raw_line in markdown.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            story.append(Spacer(1, 4))
+            continue
+        if stripped == "---":
+            story.append(Spacer(1, 7))
+            continue
+        if stripped.startswith("# "):
+            story.append(Paragraph(pdf_escape(stripped[2:].strip()), styles["ReportH1"]))
+            continue
+        if stripped.startswith("## "):
+            story.append(Paragraph(pdf_escape(stripped[3:].strip()), styles["ReportH2"]))
+            continue
+        if stripped.startswith("### "):
+            story.append(Paragraph(pdf_escape(stripped[4:].strip()), styles["ReportH3"]))
+            continue
+        if stripped.startswith("#### "):
+            story.append(Paragraph(pdf_escape(stripped[5:].strip()), styles["ReportH4"]))
+            continue
+        if stripped.startswith(">"):
+            story.append(Paragraph(pdf_escape(stripped.lstrip("> ").strip()), styles["ReportQuote"]))
+            continue
+        if is_markdown_table_line(stripped):
+            story.append(Paragraph(pdf_escape(stripped), styles["ReportTableLine"]))
+            continue
+        story.append(Paragraph(pdf_escape(stripped), styles["Body"]))
+
+
+def is_markdown_table_line(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|")
+
+
 def key_value_table(rows: list[list[Any]], styles: dict[str, ParagraphStyle]) -> Table:
     return data_table([["字段", "内容"], *rows], [115, 540], styles)
 
@@ -338,6 +396,47 @@ def pdf_styles() -> dict[str, ParagraphStyle]:
             textColor=colors.HexColor("#17383b"),
             spaceAfter=4,
         ),
+        "ReportH1": ParagraphStyle(
+            "PlanReportH1",
+            parent=base["Title"],
+            fontName=PDF_FONT,
+            fontSize=16,
+            leading=22,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#15383b"),
+            spaceBefore=4,
+            spaceAfter=8,
+        ),
+        "ReportH2": ParagraphStyle(
+            "PlanReportH2",
+            parent=base["Heading2"],
+            fontName=PDF_FONT,
+            fontSize=12,
+            leading=16,
+            textColor=colors.HexColor("#17383b"),
+            spaceBefore=8,
+            spaceAfter=4,
+        ),
+        "ReportH3": ParagraphStyle(
+            "PlanReportH3",
+            parent=base["Heading3"],
+            fontName=PDF_FONT,
+            fontSize=10,
+            leading=14,
+            textColor=colors.HexColor("#17383b"),
+            spaceBefore=6,
+            spaceAfter=3,
+        ),
+        "ReportH4": ParagraphStyle(
+            "PlanReportH4",
+            parent=base["Heading4"],
+            fontName=PDF_FONT,
+            fontSize=9,
+            leading=13,
+            textColor=colors.HexColor("#263a3f"),
+            spaceBefore=5,
+            spaceAfter=2,
+        ),
         "Body": ParagraphStyle(
             "PlanBody",
             parent=base["BodyText"],
@@ -345,6 +444,29 @@ def pdf_styles() -> dict[str, ParagraphStyle]:
             fontSize=9,
             leading=13,
             textColor=colors.HexColor("#263a3f"),
+        ),
+        "ReportQuote": ParagraphStyle(
+            "PlanReportQuote",
+            parent=base["BodyText"],
+            fontName=PDF_FONT,
+            fontSize=8,
+            leading=12,
+            leftIndent=8,
+            rightIndent=8,
+            borderPadding=5,
+            borderColor=colors.HexColor("#c3d4d5"),
+            borderWidth=0.5,
+            backColor=colors.HexColor("#f7faf9"),
+            textColor=colors.HexColor("#425357"),
+        ),
+        "ReportTableLine": ParagraphStyle(
+            "PlanReportTableLine",
+            parent=base["BodyText"],
+            fontName=PDF_FONT,
+            fontSize=7,
+            leading=10,
+            textColor=colors.HexColor("#263a3f"),
+            wordWrap="CJK",
         ),
         "Muted": ParagraphStyle(
             "PlanMuted",
@@ -413,6 +535,63 @@ def normalize_content_plan_item(row: dict[str, Any], index: int) -> dict[str, An
 def build_display_sections(plan: dict[str, Any]) -> list[dict[str, Any]]:
     section_specs = [
         (
+            "demand_variables",
+            "用户需求变量池",
+            [
+                ("demand_variable", "用户需求变量"),
+                ("type", "所属类型"),
+                ("pain_point", "真实痛点"),
+                ("keywords", "对应关键词"),
+                ("content_angle", "可转化内容角度"),
+                ("recommendation_standard_impact", "对推荐标准的影响"),
+            ],
+        ),
+        (
+            "keyword_variable_mapping",
+            "关键词 × 用户需求变量映射",
+            [
+                ("keyword", "关键词"),
+                ("intent_group", "意图簇"),
+                ("primary_demand_variable", "主需求变量"),
+                ("secondary_demand_variable", "辅助需求变量"),
+                ("user_real_question", "用户真实问题"),
+                ("angle", "可切入角度"),
+                ("risk", "内容风险"),
+            ],
+        ),
+        (
+            "content_theme_clusters",
+            "内容主题簇",
+            [
+                ("theme_cluster", "内容主题簇"),
+                ("keywords", "覆盖关键词"),
+                ("core_user_demand", "核心用户需求"),
+                ("core_standard", "核心判断标准"),
+                ("required_evidence", "必备证据"),
+                ("risk_boundary", "风险边界"),
+            ],
+        ),
+        (
+            "weekly_publishing_mix",
+            "周发布配比",
+            [
+                ("intent_group", "意图簇"),
+                ("keywords", "覆盖关键词"),
+                ("weekly_volume", "周发布量"),
+                ("channel_mix", "主要渠道组合"),
+            ],
+        ),
+        (
+            "monthly_publishing_mix",
+            "月发布配比",
+            [
+                ("intent_group", "意图簇"),
+                ("keywords", "覆盖关键词"),
+                ("monthly_volume", "月发布量"),
+                ("notes", "备注"),
+            ],
+        ),
+        (
             "shared_supporting_articles",
             "共享支撑文",
             [
@@ -475,6 +654,37 @@ def build_display_sections(plan: dict[str, Any]) -> list[dict[str, Any]]:
             ],
         ),
         (
+            "daily_supplement_pool",
+            "日常补充内容池",
+            [
+                ("type", "补充类型"),
+                ("stage", "适用阶段"),
+                ("role", "作用"),
+                ("title_direction", "标题方向示例"),
+                ("channels", "推荐渠道"),
+            ],
+        ),
+        (
+            "ai_retest_rules",
+            "AI 复测与补内容规则",
+            [
+                ("retest_problem", "复测问题"),
+                ("possible_reason", "可能原因"),
+                ("missing_variable", "对应用户变量缺口"),
+                ("content_direction", "补内容方向"),
+                ("article_type", "推荐文章类型"),
+                ("channel", "推荐渠道"),
+            ],
+        ),
+        (
+            "anti_homogenization_requirements",
+            "Brief 防同质化要求",
+            [
+                ("field", "字段"),
+                ("requirement", "要求"),
+            ],
+        ),
+        (
             "warnings",
             "风险提示",
             [
@@ -488,6 +698,14 @@ def build_display_sections(plan: dict[str, Any]) -> list[dict[str, Any]]:
         if section["items"]:
             sections.append(section)
     return sections
+
+
+def normalize_content_plan_source(source: str) -> str:
+    return "demand_matrix" if source == "demand_matrix" else "matrix"
+
+
+def content_plan_source_label(source: str) -> str:
+    return "需求驱动内容矩阵规划" if source == "demand_matrix" else "GEO 内容规划"
 
 
 def display_section(section_id: str, title: str, rows: list[dict[str, Any]], fields: list[tuple[str, str]]) -> dict[str, Any]:

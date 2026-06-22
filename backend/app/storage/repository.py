@@ -235,9 +235,11 @@ class ProjectRepository:
             source_payload = {**payload, "title": title}
             source = normalize_custom_source(project, source_payload)
             if source.source_id in existing_ids or source.source_id in next_ids:
-                raise ValueError(f"同标题的自定义文章已存在：{title}")
+                continue
             next_sources.append(source)
             next_ids.add(source.source_id)
+        if not next_sources:
+            raise ValueError("这一批自定义文章标题都已存在。")
         project.custom_sources.extend(next_sources)
         self.save_project(project)
         self.log(project_id, f"批量新增自定义文章规划：{len(next_sources)} 篇")
@@ -280,6 +282,93 @@ class ProjectRepository:
             raise FileNotFoundError(f"Custom source not found: {source_id}")
         self.save_project(project)
         self.log(project_id, f"删除自定义文章规划：{target_id}")
+        return project
+
+    def import_markdown_articles(self, project_id: str, articles: list[dict[str, Any]]) -> Project:
+        project = self.load_project(project_id)
+        if not articles:
+            raise ValueError("请至少上传一篇 Markdown 文章。")
+
+        state = project.steps["article"]
+        output = dict(state.output or {})
+        current_items = output.get("items") if isinstance(output.get("items"), list) else []
+        existing_ids = {
+            str(item.get("id") or item.get("article_id") or "").strip()
+            for item in current_items
+            if isinstance(item, dict)
+        }
+        now = utc_now()
+        imported_items: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for index, article in enumerate(articles, start=1):
+            filename = clean_import_text(article.get("filename")) or f"article-{index}.md"
+            if Path(filename).suffix.lower() != ".md":
+                raise ValueError(f"仅支持 .md 文件：{filename}")
+            markdown = normalize_import_markdown(article.get("markdown"))
+            if not markdown.strip():
+                raise ValueError(f"Markdown 内容不能为空：{filename}")
+            keyword = clean_import_text(article.get("keyword"))
+            article_type = clean_import_text(article.get("type") or article.get("article_type"))
+            if not keyword:
+                raise ValueError(f"请填写关键词：{filename}")
+            if not article_type:
+                raise ValueError(f"请填写文章类型：{filename}")
+
+            title = clean_import_text(article.get("title")) or markdown_h1_title(markdown) or Path(filename).stem
+            final_markdown = markdown.strip() + "\n"
+            content_hash = hashlib.sha256(markdown.strip().encode("utf-8")).hexdigest()
+            article_id = imported_article_id(title, content_hash)
+            if article_id in existing_ids or article_id in seen_ids:
+                raise ValueError(f"同标题和内容的导入文章已存在：{title}")
+            seen_ids.add(article_id)
+            imported_items.append(
+                {
+                    "id": article_id,
+                    "article_id": article_id,
+                    "source_id": article_id,
+                    "source_step": "imported",
+                    "brief_id": "",
+                    "keyword": keyword,
+                    "type": article_type,
+                    "article_type": article_type,
+                    "title": title,
+                    "role": "本地 Markdown 导入定稿",
+                    "channel": clean_import_text(article.get("channel")),
+                    "status": "completed",
+                    "used": "未使用",
+                    "markdown": final_markdown,
+                    "article_audit_status": "approved",
+                    "article_audited_at": now,
+                    "generated_at": now,
+                    "updated_at": now,
+                    "revision": 1,
+                    "brief_revision": 1,
+                    "raw": {
+                        "imported_from": {
+                            "filename": filename,
+                            "imported_at": now,
+                            "content_hash": content_hash,
+                        }
+                    },
+                }
+            )
+
+        output["items"] = [item for item in current_items if isinstance(item, dict)] + imported_items
+        output["status"] = "completed"
+        output["updated_at"] = now
+        state.status = "completed"
+        state.output = output
+        state.error = None
+        state.updated_at = now
+        project.steps["article"] = state
+
+        for item in imported_items:
+            output_name = slugify(str(item["id"]), fallback="imported-article")
+            self.write_output(project, f"articles/{output_name}.md", str(item["markdown"]))
+
+        self.save_project(project)
+        self.log(project_id, f"导入本地 Markdown 定稿：{len(imported_items)} 篇")
         return project
 
     def update_step(
@@ -526,6 +615,7 @@ def blocked_step_label(step: str) -> str:
         "materials": "资料解析",
         "intake": "抽取表",
         "matrix": "内容矩阵",
+        "demand_matrix": "需求驱动内容矩阵",
         "breakthrough": "逐词击破",
         "brief": "Brief",
         "article": "正文",
@@ -692,6 +782,31 @@ def infer_custom_article_type(title: str) -> str:
 
 def compact_custom_text(value: str) -> str:
     return clean_custom_text(value).replace(" ", "").lower()
+
+
+def clean_import_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def normalize_import_markdown(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def markdown_h1_title(markdown: str) -> str:
+    for line in markdown.splitlines():
+        value = line.strip()
+        if value.startswith("# ") and not value.startswith("## "):
+            return clean_import_text(value[2:])
+    return ""
+
+
+def imported_article_id(title: str, content_hash: str) -> str:
+    title_slug = slugify(title, fallback="article")
+    return slugify(f"imported-{title_slug}-{content_hash[:12]}", fallback=f"imported-{content_hash[:12]}")
 
 
 def iter_custom_dicts(value: Any):

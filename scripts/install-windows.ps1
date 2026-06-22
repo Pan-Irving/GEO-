@@ -31,5 +31,16 @@ if (-not (Test-Path ".venv")) {
 Set-Location (Join-Path $RootDir "frontend")
 npm install
 
+Set-Location (Join-Path $RootDir "publishing\backend")
+if (-not (Test-Path ".venv")) {
+  python -m venv .venv
+}
+
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+Set-Location (Join-Path $RootDir "publishing\frontend")
+npm install
+
 Set-Location $RootDir
 Write-Host "Install complete. Next: edit .env, then run .\scripts\start-all-windows.ps1"

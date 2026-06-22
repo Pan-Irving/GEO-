@@ -29,12 +29,12 @@ import {
   X
 } from "lucide-react";
 import { api } from "./api/client";
-import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, Project, PublishingUsageSummary, WorkflowStep } from "./api/types";
+import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MarkdownArticleImportMeta, MatrixImportDraft, Project, PublishingUsageSummary, WorkflowStep } from "./api/types";
 import "./styles/app.css";
 
-type AppView = "dashboard" | "upload" | "planning" | "custom" | "brief" | "article" | "library";
-type PlanningTab = "matrix" | "breakthrough";
-type EditableStep = "matrix" | "breakthrough" | "brief" | "article";
+type AppView = "dashboard" | "upload" | "planning" | "custom" | "brief" | "article" | "import" | "library";
+type PlanningTab = "matrix" | "demand_matrix" | "breakthrough";
+type EditableStep = "matrix" | "demand_matrix" | "breakthrough" | "brief" | "article";
 type BriefModifiedFilter = "all" | "modified" | "unmodified";
 type BriefArticleFilter = "all" | "generated" | "not_generated" | "needs_update" | "failed" | "pending_review" | "approved";
 type CustomBriefFilter = "all" | "generated" | "not_generated";
@@ -118,13 +118,22 @@ interface DashboardDrilldown {
   tab?: PlanningTab;
 }
 
+interface MarkdownImportDraft {
+  id: string;
+  file: File;
+  filename: string;
+  title: string;
+  keyword: string;
+  type: string;
+  status: "ready" | "invalid";
+  error: string;
+}
+
 interface DashboardSummary {
   title: string;
   brand: string;
   product: string;
-  industry: string;
-  category: string;
-  competitors: string[];
+  mainKeywords: string[];
   keywordCount: number;
   totalPlans: number;
   period: string;
@@ -198,7 +207,6 @@ const emptyCustomFilters: CustomFilterState = {
 
 const coreArticleTypes = ["支柱标准文", "榜单推荐文", "横评对比文", "场景选购文", "产品证据文", "FAQ问答文"];
 const coreArticleTypeSet = new Set(coreArticleTypes);
-const publishingFrontendUrl = import.meta.env.VITE_PUBLISHING_FRONTEND_URL || "http://127.0.0.1:5174";
 
 const appSteps: Array<{ id: AppView; title: string; desc: string; backendStep?: WorkflowStep }> = [
   { id: "dashboard", title: "项目看板", desc: "整体产出与进度" },
@@ -207,6 +215,7 @@ const appSteps: Array<{ id: AppView; title: string; desc: string; backendStep?: 
   { id: "custom", title: "自定义文章", desc: "批量添加选题" },
   { id: "brief", title: "Brief 审核", desc: "按关键词分组", backendStep: "brief" },
   { id: "article", title: "正文审核", desc: "折叠查阅与定稿", backendStep: "article" },
+  { id: "import", title: "导入定稿", desc: "上传本地 Markdown" },
   { id: "library", title: "定稿归档", desc: "按关键词与类型分组", backendStep: "archive" }
 ];
 
@@ -218,6 +227,7 @@ const materialSlots = [
   { id: "competitor", name: "竞品对比资料", required: true, desc: "竞品品牌、替代方案、对比维度和不同时期版本。" },
   { id: "forbidden", name: "禁用词与合规边界", required: true, desc: "绝对化禁词、风险表达、内部执行话术和合规要求。" },
   { id: "expression", name: "客户表达规范", required: true, desc: "品牌标准叫法、产品标准表述、推荐语气和不允许改写的表达。" },
+  { id: "demand_report", name: "用户需求挖掘报告", required: false, desc: "新需求驱动内容矩阵专用：场景、痛点、隐性变量、搜索问题和内容机会。" },
   { id: "other", name: "其他补充资料", required: false, desc: "访谈纪要、平台截图、历史文章、会议记录等可选补充。" }
 ];
 
@@ -236,15 +246,22 @@ function App() {
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null);
   const [projectName, setProjectName] = useState("GEO 内容项目");
-  const [health, setHealth] = useState<{ model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean } | null>(null);
+  const [health, setHealth] = useState<{ model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean; publishing_frontend_url?: string } | null>(null);
   const [publishingUsage, setPublishingUsage] = useState<PublishingUsageSummary | null>(null);
   const [message, setMessage] = useState("");
+  const messageTimerRef = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
   const selectedProjectIdRef = useRef("");
 
   useEffect(() => {
     void loadProjects();
-    void api.health().then(setHealth).catch(error => setMessage(error.message));
+    void api.health().then(setHealth).catch(error => showMessage(error.message));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (messageTimerRef.current) window.clearTimeout(messageTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -270,6 +287,7 @@ function App() {
     custom: ["自定义文章规划", "批量添加人工指定选题，选择文章类型后生成 Brief。"],
     brief: ["Brief 批量生成与审核", "按关键词分组审核 Brief，确认后进入正文生成。"],
     article: ["正文生成、审核与定稿", "折叠查阅正文，提交修改意见或确认定稿。"],
+    import: ["导入本地定稿", "批量上传 Markdown 正文，补充关键词和文章类型后直接进入定稿归档。"],
     library: ["定稿文章归档与查阅", "查看已审核通过正文，筛选、查阅并批量导出。"]
   }), []);
 
@@ -314,7 +332,7 @@ function App() {
     setSelectedArchiveArticles(new Set());
     setPublishingUsage(null);
     setDetail(null);
-    setMessage("");
+    showMessage("");
     if (!projectId) {
       setProject(null);
       return;
@@ -325,21 +343,34 @@ function App() {
 
   async function manualRefresh() {
     setBusy(false);
-    setMessage("");
+    showMessage("");
     if (selectedProjectIdRef.current) await refreshProject(selectedProjectIdRef.current);
     else await loadProjects();
   }
 
+  function showMessage(text: string) {
+    if (messageTimerRef.current) {
+      window.clearTimeout(messageTimerRef.current);
+      messageTimerRef.current = null;
+    }
+    setMessage(text);
+    if (!text) return;
+    messageTimerRef.current = window.setTimeout(() => {
+      setMessage("");
+      messageTimerRef.current = null;
+    }, 3000);
+  }
+
   async function run(action: () => Promise<unknown>, success: string) {
     setBusy(true);
-    setMessage("");
+    showMessage("");
     try {
       await action();
-      setMessage(success);
+      showMessage(success);
       if (selectedProjectIdRef.current) await refreshProject(selectedProjectIdRef.current);
       else await loadProjects();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      showMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -358,7 +389,7 @@ function App() {
 
   async function deleteProject(projectId: string) {
     setBusy(true);
-    setMessage("");
+    showMessage("");
     try {
       await api.deleteProject(projectId);
       const nextProjects = await api.listProjects();
@@ -377,10 +408,10 @@ function App() {
       setDashboardDrilldown(null);
       setDetail(null);
       setDeleteProjectTarget(null);
-      setMessage("项目已删除。");
+      showMessage("项目已删除。");
       if (nextProject) await refreshProject(nextProject.id);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      showMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -388,14 +419,14 @@ function App() {
 
   async function cancelJob(jobId: string) {
     if (!project) return;
-    setMessage("");
+    showMessage("");
     try {
       const response = await api.cancelJob(project.id, jobId);
       setProject(response.project);
       setProjects(currentProjects => currentProjects.map(item => (item.id === response.project.id ? response.project : item)));
-      setMessage("已提交停止请求，当前正在执行的单个请求完成后会停止后续操作。");
+      showMessage("已提交停止请求，当前正在执行的单个请求完成后会停止后续操作。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      showMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -408,6 +439,10 @@ function App() {
 
   async function saveItem(step: EditableStep, item: ContentItem, payload: Record<string, unknown>) {
     if (!project) return;
+    if (step === "demand_matrix") {
+      setDetail(null);
+      return;
+    }
     const articleContentChanged = step === "article"
       && ((typeof payload.title === "string" && payload.title !== item.title)
         || (typeof payload.markdown === "string" && payload.markdown !== (item.markdown || "")));
@@ -424,6 +459,7 @@ function App() {
   }
 
   async function regenerateItem(step: EditableStep, item: ContentItem, payload: Record<string, unknown> = {}) {
+    if (step === "demand_matrix") return;
     const reviewNotes = typeof payload.review_notes === "string" ? payload.review_notes : item.reviewNotes || "";
     if (step === "brief") {
       await runBackendStep("brief", {
@@ -486,6 +522,14 @@ function App() {
     await run(async () => {
       await api.deleteCustomSource(project.id, sourceId);
     }, "自定义文章规划已删除。");
+  }
+
+  async function importMarkdownArticles(rows: Array<{ file: File; meta: MarkdownArticleImportMeta }>) {
+    if (!project) return;
+    await run(async () => {
+      await api.importMarkdownArticles(project.id, rows);
+      setSelectedArchiveArticles(new Set());
+    }, "Markdown 定稿已导入，可在定稿归档查看；发布平台同步后即可使用。");
   }
 
   function openDashboardDrilldown(target: DashboardDrilldown) {
@@ -558,7 +602,7 @@ function App() {
           <div className="actions">
             {busy && <span className="pill"><Loader2 className="spin" size={14} />运行中</span>}
             {health && <span className="pill">规划 {health.planning_model || health.model} / 写作 {health.writing_model || health.model} / Skill {health.skill_available ? "已识别" : "缺失"}</span>}
-            <a className="btn" href={publishingFrontendUrl} target="_blank" rel="noreferrer"><ArrowUpRight size={15} />发布工作台</a>
+            <a className="btn" href={health?.publishing_frontend_url || "http://127.0.0.1:5174"} target="_blank" rel="noreferrer"><ArrowUpRight size={15} />发布工作台</a>
             <button className="btn" onClick={() => void manualRefresh()}><RefreshCw size={15} />刷新状态</button>
           </div>
         </section>
@@ -660,6 +704,16 @@ function App() {
                 clearDashboardDrilldown={() => setDashboardDrilldown(null)}
               />
             )}
+            {current === "import" && (
+              <MarkdownImportView
+                project={project}
+                data={data}
+                onImport={importMarkdownArticles}
+                busy={busy}
+                setCurrent={setCurrent}
+                openDetail={(item) => setDetail({ step: "article", item, mode: "read" })}
+              />
+            )}
             {current === "library" && (
               <LibraryView
                 project={project}
@@ -715,12 +769,23 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
 }) {
   const dashboard = deriveDashboardData(project, data, publishingUsage);
   const [matrixSearch, setMatrixSearch] = useState("");
+  const [selectedKeywordFilter, setSelectedKeywordFilter] = useState("");
   const normalizedSearch = matrixSearch.trim().toLowerCase();
-  const matrixKeywords = dashboard.keywords.filter(row => !normalizedSearch || row.label.toLowerCase().includes(normalizedSearch));
+  const matrixKeywords = dashboard.keywords.filter(row => {
+    if (selectedKeywordFilter && row.label !== selectedKeywordFilter) return false;
+    return !normalizedSearch || row.label.toLowerCase().includes(normalizedSearch);
+  });
   const matrixTypes = dashboard.articleTypes;
   const cellByKey = new Map(dashboard.matrix.map(cell => [`${cell.keyword}\u0001${cell.type}`, cell]));
   const generatedArticles = dashboard.totals.articles;
   const finalNotUsed = Math.max(dashboard.totals.completed - dashboard.totals.used, 0);
+  function toggleKeywordFilter(keyword: string) {
+    setSelectedKeywordFilter(current => current === keyword ? "" : keyword);
+    setMatrixSearch("");
+  }
+  function clearKeywordFilter() {
+    setSelectedKeywordFilter("");
+  }
   return (
     <div className="dashboard-workspace">
       <section className="dashboard-project-card">
@@ -736,9 +801,19 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
           <button className="btn primary dashboard-cta" onClick={() => setCurrent("planning")}><Route size={15} />进入内容规划</button>
         </div>
         <div className="dashboard-tags">
-          {dashboard.summary.industry && <Chip text={dashboard.summary.industry} type="brand" />}
-          {dashboard.summary.category && <Chip text={dashboard.summary.category} />}
-          {dashboard.summary.competitors.slice(0, 4).map(competitor => <Chip key={competitor} text={competitor} />)}
+          {dashboard.summary.mainKeywords.length
+            ? dashboard.summary.mainKeywords.map((keyword, index) => (
+              <button
+                key={`${keyword}-${index}`}
+                className={`chip chip-button dashboard-keyword-chip ${selectedKeywordFilter === keyword ? "is-active" : ""}`.trim()}
+                title={`筛选关键词：${keyword}`}
+                type="button"
+                onClick={() => toggleKeywordFilter(keyword)}
+              >
+                <span>{keyword}</span>
+              </button>
+            ))
+            : <span className="chip dashboard-keyword-chip is-empty"><span>暂无主要关键词</span></span>}
         </div>
       </section>
 
@@ -788,7 +863,15 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
             <Search size={15} />
             <input value={matrixSearch} placeholder="输入关键词检索" onChange={event => setMatrixSearch(event.target.value)} />
           </label>
-          <span>当前展示 {matrixKeywords.length} 个关键词 · {dashboard.totals.plans} 篇文章规划</span>
+          <div className="dashboard-matrix-filter-meta">
+            {selectedKeywordFilter && (
+              <button className="chip chip-button dashboard-filter-chip" type="button" onClick={clearKeywordFilter} title="清除关键词筛选">
+                <span>已筛选：{selectedKeywordFilter}</span>
+                <X size={13} />
+              </button>
+            )}
+            <span>当前展示 {matrixKeywords.length} 个关键词 · {dashboard.totals.plans} 篇文章规划</span>
+          </div>
         </div>
         <div className="dashboard-matrix-scroll">
           <table className="dashboard-matrix">
@@ -799,7 +882,7 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
               </tr>
             </thead>
             <tbody>
-              {matrixKeywords.map((keyword, index) => (
+              {matrixKeywords.length ? matrixKeywords.map((keyword, index) => (
                 <tr key={keyword.id}>
                   <th>
                     <button className="matrix-keyword" onClick={() => openDrilldown(keyword.drilldown)}>
@@ -815,14 +898,20 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
                       <td key={cell.id}>
                         <button className={`dashboard-matrix-cell ${cell.stage}`} onClick={() => openDrilldown(cell.drilldown)}>
                           <strong>{cell.label}</strong>
-                          <span>{cell.plans} 规划 · {cell.briefs} Brief</span>
-                          <span>{cell.articles} 正文 · {cell.used} 已使用 · {cell.purchasing} 采购中</span>
+                          <span>{cell.plans} 规划 · {cell.briefs} Brief · {cell.articles} 正文</span>
+                          <span>{cell.used} 已使用 · {cell.purchasing} 采购中</span>
                         </button>
                       </td>
                     );
                   })}
                 </tr>
-              ))}
+              )) : (
+                <tr>
+                  <td className="dashboard-matrix-empty" colSpan={matrixTypes.length + 1}>
+                    暂无匹配关键词，请清除筛选或更换关键词。
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1217,38 +1306,48 @@ function PlanningView(props: {
   const [expandedPlanGroups, setExpandedPlanGroups] = useState<Set<string>>(new Set());
   const [selectedBreakthroughKeywords, setSelectedBreakthroughKeywords] = useState<Set<string>>(new Set());
   const [planningFilters, setPlanningFilters] = useState<PlanningFilterState>(emptyPlanningFilters);
-  const activeBackendStep: WorkflowStep = tab === "matrix" ? "matrix" : "breakthrough";
+  const activeBackendStep: WorkflowStep = tab === "matrix" ? "matrix" : tab === "demand_matrix" ? "demand_matrix" : "breakthrough";
   const stepState = project.steps[activeBackendStep];
-  const allRows = tab === "matrix" ? data.matrixPlans : data.breakthroughPlans;
+  const allRows = tab === "matrix" ? data.matrixPlans : tab === "demand_matrix" ? data.demandMatrixPlans : data.breakthroughPlans;
   const rows = filterPlanningItems(allRows, planningFilters);
   const activeStepJobRunning = project.jobs.some(job => job.step === activeBackendStep && ["queued", "running", "cancelling"].includes(job.status));
   const isRunning = stepState?.status === "running" || activeStepJobRunning;
   const blockedMessage = stepState ? outputBlockerMessage(stepState.output) : "";
   const isBlocked = Boolean(blockedMessage);
   const hasRows = allRows.length > 0;
+  const readOnlyPlanning = activeBackendStep === "demand_matrix";
   const hasStepOutput = Boolean(stepState && Object.keys(stepState.output || {}).length > 0);
-  const planningLabel = tab === "matrix" ? "内容矩阵" : "逐词击破";
+  const planningLabel = tab === "matrix" ? "内容矩阵" : tab === "demand_matrix" ? "需求驱动矩阵" : "逐词击破";
   const keywordOptions = uniqueStrings([...data.matrixKeywords, ...data.confirmedBreakthroughKeywords]);
   const selectedKeywordList = keywordOptions.filter(keyword => selectedBreakthroughKeywords.has(keyword));
   const breakthroughScopeKeywordList = data.confirmedBreakthroughKeywords;
   const completedBreakthroughKeywordList = completeBreakthroughKeywords(data.breakthroughPlans);
   const matrixGroupMeta = new Map(data.matrixIntentGroups.map(group => [group.name, group]));
+  const demandMatrixGroupMeta = new Map(data.demandMatrixIntentGroups.map(group => [group.name, group]));
   const planningKeywordOptions = uniqueStrings(allRows.map(item => item.keyword).filter(Boolean));
   const planningTypeOptions = orderedArticleTypes(allRows);
   const matrixContentPlanReady = project.steps.matrix.status === "completed" || project.steps.matrix.status === "confirmed";
+  const demandMatrixContentPlanReady = project.steps.demand_matrix?.status === "completed" || project.steps.demand_matrix?.status === "confirmed";
   const matrixContentPlanStats = matrixContentPlanSummary(project, data);
+  const demandMatrixContentPlanStats = demandMatrixContentPlanSummary(project, data);
+  const demandMatrixReady = demandMatrixPrerequisitesReady(project);
+  const demandMatrixDisabledReason = demandMatrixReady ? "" : demandMatrixPrerequisiteMessage(project);
   const matrixImportReady = matrixImportPrerequisitesReady(project);
   const matrixImportDisabledReason = matrixImportReady ? "" : "请先完成资料解析和项目信息抽取，再导入外部内容矩阵。";
-  const groupedRows = tab === "matrix" ? groupMatrixRowsByIntent(rows, data.matrixIntentGroups) : groupBy(rows, "keyword");
+  const groupedRows = tab === "matrix"
+    ? groupMatrixRowsByIntent(rows, data.matrixIntentGroups)
+    : tab === "demand_matrix"
+      ? groupMatrixRowsByIntent(rows, data.demandMatrixIntentGroups)
+      : groupBy(rows, "keyword");
   const hasBreakthroughScopeKeywords = breakthroughScopeKeywordList.length > 0;
   const needsBreakthroughKeywords = activeBackendStep === "breakthrough" && !hasBreakthroughScopeKeywords;
   const breakthroughMissingTypes = missingBreakthroughTypes(data.breakthroughPlans, breakthroughScopeKeywordList);
   const breakthroughMissingCount = Object.values(breakthroughMissingTypes).reduce((total, types) => total + types.length, 0);
   const breakthroughNewKeywordCount = Object.values(breakthroughMissingTypes).filter(types => types.length === coreArticleTypes.length).length;
   const breakthroughComplete = activeBackendStep === "breakthrough" && hasStepOutput && hasBreakthroughScopeKeywords && breakthroughMissingCount === 0;
-  const canRegenerateCurrentStep = Boolean(activeBackendStep === "matrix" && hasStepOutput && !isRunning);
+  const canRegenerateCurrentStep = Boolean((activeBackendStep === "matrix" || activeBackendStep === "demand_matrix") && hasStepOutput && !isRunning);
   const canForceRegenerateBreakthrough = Boolean(activeBackendStep === "breakthrough" && hasStepOutput && !isRunning && !needsBreakthroughKeywords);
-  const generationLocked = isRunning || needsBreakthroughKeywords || breakthroughComplete;
+  const generationLocked = isRunning || needsBreakthroughKeywords || breakthroughComplete || (activeBackendStep === "demand_matrix" && !demandMatrixReady);
   const isConfirmed = stepState?.status === "confirmed";
   const planningSourceRows = [...data.matrixPlans, ...data.breakthroughPlans];
   const planningSourceIds = new Set(planningSourceRows.map(item => item.id));
@@ -1257,7 +1356,7 @@ function PlanningView(props: {
   const articleByBriefId = new Map(data.articles.map(item => [item.briefId || item.id, item]));
   const pendingBriefSources = selectedPlanItems.filter(item => !briefIsGenerated(briefBySource.get(item.sourceId)));
   const selectedCount = selectedPlanItems.length;
-  const planningBriefJob = briefProgressForPlanning(project, activeBackendStep);
+  const planningBriefJob = activeBackendStep === "demand_matrix" ? undefined : briefProgressForPlanning(project, activeBackendStep);
   const selectedBriefButtonText = selectedCount === 0
     ? "生成选中 Brief"
     : pendingBriefSources.length === 0
@@ -1265,14 +1364,16 @@ function PlanningView(props: {
       : `生成选中 Brief（${pendingBriefSources.length} 篇）`;
   const confirmedKeywordSignature = breakthroughScopeKeywordList.join("\u0001");
   const emptyText = isRunning
-    ? `后台 Agent 正在生成${tab === "matrix" ? "内容矩阵" : "逐词击破"}，可以点击“刷新状态”查看进度。`
+    ? `后台 Agent 正在生成${planningLabel}，可以点击“刷新状态”查看进度。`
+    : activeBackendStep === "demand_matrix" && !demandMatrixReady
+      ? demandMatrixDisabledReason
     : needsBreakthroughKeywords
       ? "逐词击破是可选增强；如需生成逐词击破规划，请先回内容矩阵 Tab 勾选并保存关键词。"
     : isBlocked
       ? blockedMessage
       : stepState?.status === "failed"
         ? stepState.error || "任务失败，请调整后重新生成。"
-        : `点击“生成${tab === "matrix" ? "内容矩阵" : "逐词击破"}”后，这里会展示后台 Agent 的真实输出。`;
+        : `点击“生成${planningLabel}”后，这里会展示后台 Agent 的真实输出。`;
   useEffect(() => {
     setSelectedBreakthroughKeywords(new Set());
   }, [project.id, confirmedKeywordSignature]);
@@ -1292,7 +1393,7 @@ function PlanningView(props: {
     setContentPlan(null);
     setContentPlanOpen(false);
     setContentPlanError("");
-  }, [project.id, project.steps.matrix.updated_at]);
+  }, [project.id, tab]);
   useEffect(() => {
     setMatrixImportDraftId("");
     setMatrixImportDraft(null);
@@ -1328,14 +1429,16 @@ function PlanningView(props: {
     setCurrent("brief");
   }
   async function openContentPlan() {
-    if (!matrixContentPlanReady || !data.matrixPlans.length) {
-      setContentPlanError("请先生成内容矩阵。");
+    const source = tab === "demand_matrix" ? "demand_matrix" : "matrix";
+    const ready = source === "demand_matrix" ? demandMatrixContentPlanReady && data.demandMatrixPlans.length > 0 : matrixContentPlanReady && data.matrixPlans.length > 0;
+    if (!ready) {
+      setContentPlanError(source === "demand_matrix" ? "请先生成需求驱动矩阵。" : "请先生成内容矩阵。");
       return;
     }
     setContentPlanLoading(true);
     setContentPlanError("");
     try {
-      const next = await api.getContentPlan(project.id);
+      const next = await api.getContentPlan(project.id, source);
       setContentPlan(next);
       setContentPlanOpen(true);
     } catch (error) {
@@ -1345,15 +1448,18 @@ function PlanningView(props: {
     }
   }
   async function exportContentPlan() {
-    if (!matrixContentPlanReady || !data.matrixPlans.length) {
-      setContentPlanError("请先生成内容矩阵。");
+    const source = tab === "demand_matrix" ? "demand_matrix" : "matrix";
+    const ready = source === "demand_matrix" ? demandMatrixContentPlanReady && data.demandMatrixPlans.length > 0 : matrixContentPlanReady && data.matrixPlans.length > 0;
+    if (!ready) {
+      setContentPlanError(source === "demand_matrix" ? "请先生成需求驱动矩阵。" : "请先生成内容矩阵。");
       return;
     }
     setContentPlanLoading(true);
     setContentPlanError("");
     try {
-      const blob = await api.exportContentPlanPdf(project.id);
-      downloadBlob(blob, `内容规划-${slugValue(project.name, "content-plan")}-${new Date().toISOString().slice(0, 10)}.pdf`);
+      const blob = await api.exportContentPlanPdf(project.id, source);
+      const prefix = source === "demand_matrix" ? "需求驱动内容规划" : "内容规划";
+      downloadBlob(blob, `${prefix}-${slugValue(project.name, "content-plan")}-${new Date().toISOString().slice(0, 10)}.pdf`);
     } catch (error) {
       setContentPlanError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1439,7 +1545,7 @@ function PlanningView(props: {
     <div className="section-stack">
       <div className="bulk-bar">
         <div>
-          <strong>{tab === "matrix" ? "内容矩阵整体规划" : "逐词击破六类规划"}</strong>
+          <strong>{tab === "matrix" ? "内容矩阵整体规划" : tab === "demand_matrix" ? "需求驱动内容矩阵" : "逐词击破六类规划"}</strong>
           <span>
             {hasRows
               ? `后台 Agent 已生成 ${rows.length} 条规划。`
@@ -1459,7 +1565,7 @@ function PlanningView(props: {
               disabled={generationLocked}
               onClick={() => {
                 if (canRegenerateCurrentStep) setRegenerateStep(activeBackendStep);
-                else void runBackendStep(activeBackendStep, breakthroughRunPayload);
+                else void runBackendStep(activeBackendStep, {});
               }}
             >
               {generationButtonText}
@@ -1479,7 +1585,7 @@ function PlanningView(props: {
                 const step = regenerateStep;
                 setRegenerateStep(null);
                 setSelectedPlans(current => {
-                  const staleIds = new Set((step === "matrix" ? data.matrixPlans : data.breakthroughPlans).map(item => item.id));
+                  const staleIds = new Set((step === "matrix" ? data.matrixPlans : step === "demand_matrix" ? data.demandMatrixPlans : data.breakthroughPlans).map(item => item.id));
                   return new Set([...current].filter(id => !staleIds.has(id)));
                 });
                 void runBackendStep(step, step === "breakthrough" ? { force: true, confirmed_keywords: breakthroughScopeKeywordList } : { force: true });
@@ -1492,6 +1598,7 @@ function PlanningView(props: {
       <JobProgress job={planningBriefJob} dismissedJobIds={dismissedJobIds} onDismiss={dismissJob} onCancel={cancelJob} />
       <div className="tabs">
         <button className={tab === "matrix" ? "active" : ""} onClick={() => setTab("matrix")}>内容矩阵</button>
+        <button className={tab === "demand_matrix" ? "active" : ""} onClick={() => setTab("demand_matrix")}>需求驱动矩阵</button>
         <button className={tab === "breakthrough" ? "active" : ""} onClick={() => setTab("breakthrough")}>逐词击破</button>
       </div>
       {tab === "matrix" && (
@@ -1506,6 +1613,18 @@ function PlanningView(props: {
           importReady={matrixImportReady}
           importDisabledReason={matrixImportDisabledReason}
           onImport={(file) => void importMatrixPlan(file)}
+          onPreview={() => void openContentPlan()}
+          onExport={() => void exportContentPlan()}
+        />
+      )}
+      {tab === "demand_matrix" && (
+        <DemandMatrixPlanCard
+          ready={demandMatrixContentPlanReady && data.demandMatrixPlans.length > 0}
+          stats={demandMatrixContentPlanStats}
+          loading={contentPlanLoading}
+          error={contentPlanError}
+          canGenerate={demandMatrixReady}
+          disabledReason={demandMatrixDisabledReason}
           onPreview={() => void openContentPlan()}
           onExport={() => void exportContentPlan()}
         />
@@ -1591,26 +1710,28 @@ function PlanningView(props: {
           )}
         </div>
       )}
-      <div className="bulk-bar selection-bar">
-        <div>
-          <strong>已选 {selectedCount} 篇规划</strong>
-          <span>{selectedCount ? `其中 ${pendingBriefSources.length} 篇尚未生成 Brief。` : "先勾选内容矩阵或逐词击破里的规划。"}</span>
+      {!readOnlyPlanning && (
+        <div className="bulk-bar selection-bar">
+          <div>
+            <strong>已选 {selectedCount} 篇规划</strong>
+            <span>{selectedCount ? `其中 ${pendingBriefSources.length} 篇尚未生成 Brief。` : "先勾选内容矩阵或逐词击破里的规划。"}</span>
+          </div>
+          <div className="actions">
+            <button className="btn" disabled={!selectedCount} onClick={() => setSelectedPlans(current => new Set([...current].filter(id => !planningSourceIds.has(id))))}>清空选择</button>
+            <button className="btn primary" disabled={!pendingBriefSources.length} onClick={() => void generateSelectedBriefs()}>{selectedBriefButtonText}</button>
+          </div>
         </div>
-        <div className="actions">
-          <button className="btn" disabled={!selectedCount} onClick={() => setSelectedPlans(current => new Set([...current].filter(id => !planningSourceIds.has(id))))}>清空选择</button>
-          <button className="btn primary" disabled={!pendingBriefSources.length} onClick={() => void generateSelectedBriefs()}>{selectedBriefButtonText}</button>
-        </div>
-      </div>
+      )}
       {rows.length ? (
         <div className="keyword-groups">
           {Object.entries(groupedRows).map(([groupName, groupRows]) => {
             const groupKey = `${activeBackendStep}:${groupName}`;
             const expanded = expandedPlanGroups.has(groupKey);
-            const intentMeta = tab === "matrix" ? matrixGroupMeta.get(groupName) : undefined;
-            const groupTitle = `${groupName}（${planGroupStatsText(groupRows, selectedPlans, briefBySource)}）`;
+            const intentMeta = tab === "matrix" ? matrixGroupMeta.get(groupName) : tab === "demand_matrix" ? demandMatrixGroupMeta.get(groupName) : undefined;
+            const groupTitle = readOnlyPlanning ? `${groupName}（${groupRows.length} 篇规划）` : `${groupName}（${planGroupStatsText(groupRows, selectedPlans, briefBySource)}）`;
             const groupSubtitle = intentMeta
               ? matrixIntentSubtitle(intentMeta)
-              : tab === "matrix"
+              : tab === "matrix" || tab === "demand_matrix"
                 ? matrixFallbackGroupSubtitle(groupRows)
                 : "";
             return (
@@ -1624,6 +1745,7 @@ function PlanningView(props: {
                     rows={groupRows}
                     selectedPlans={selectedPlans}
                     expanded={expanded}
+                    readOnly={readOnlyPlanning}
                     onSelectionChange={setGroupSelection}
                     onToggleExpanded={() => togglePlanGroup(groupKey)}
                   />
@@ -1636,10 +1758,11 @@ function PlanningView(props: {
                         key={item.id}
                         item={item}
                         selected={selectedPlans.has(item.id)}
-                        brief={briefBySource.get(item.sourceId)}
-                        article={articleForPlanItem(item, briefBySource, articleByBriefId)}
+                        readOnly={readOnlyPlanning}
+                        brief={readOnlyPlanning ? undefined : briefBySource.get(item.sourceId)}
+                        article={readOnlyPlanning ? undefined : articleForPlanItem(item, briefBySource, articleByBriefId)}
                         onToggle={() => setSelectedPlans(current => toggleSet(current, item.id))}
-                        onOpen={() => openDetail(item.sourceStep === "breakthrough" ? "breakthrough" : "matrix", item)}
+                        onOpen={() => openDetail(item.sourceStep === "breakthrough" ? "breakthrough" : item.sourceStep === "demand_matrix" ? "demand_matrix" : "matrix", item)}
                       />
                     ))}
                   </div>
@@ -1816,6 +1939,58 @@ function ContentPlanStat({ label, value }: { label: string; value: string | numb
   );
 }
 
+function DemandMatrixPlanCard({
+  ready,
+  stats,
+  loading,
+  error,
+  canGenerate,
+  disabledReason,
+  onPreview,
+  onExport
+}: {
+  ready: boolean;
+  stats: ReturnType<typeof demandMatrixContentPlanSummary>;
+  loading: boolean;
+  error: string;
+  canGenerate: boolean;
+  disabledReason: string;
+  onPreview: () => void;
+  onExport: () => void;
+}) {
+  return (
+    <Panel
+      title="需求驱动内容规划报告"
+      subtitle="用于查看和导出新版需求变量驱动矩阵；不进入 Brief 和正文生成。"
+      icon={<FileText size={16} />}
+      aside={<Chip text={ready ? "已生成" : canGenerate ? "可生成" : "缺需求报告"} type={ready ? "good" : "warn"} />}
+    >
+      <div className="content-plan-card">
+        <div className="content-plan-stats">
+          <ContentPlanStat label="关键词" value={stats.keywordCount} />
+          <ContentPlanStat label="文章规划" value={stats.planCount} />
+          <ContentPlanStat label="文章类型" value={stats.articleTypeCount} />
+          <ContentPlanStat label="需求变量" value={stats.demandVariableCount} />
+          <ContentPlanStat label="主题簇" value={stats.themeClusterCount} />
+        </div>
+        <div className="actions">
+          <button className="btn" disabled={!ready || loading} onClick={onPreview}>
+            {loading ? <Loader2 className="spin" size={15} /> : <BookOpen size={15} />}查看规划
+          </button>
+          <button className="btn primary" disabled={!ready || loading} onClick={onExport}>
+            {loading ? <Loader2 className="spin" size={15} /> : <Download size={15} />}导出 PDF
+          </button>
+        </div>
+        <div className={`matrix-import-hint ${ready ? "completed" : canGenerate ? "" : "failed"}`}>
+          <span>{ready ? "需求驱动矩阵已生成" : canGenerate ? "可生成需求驱动矩阵" : "生成条件未满足"}</span>
+          <strong>{ready ? "该矩阵仅用于查看和导出，不进入 Brief/正文链路。" : disabledReason}</strong>
+        </div>
+        {error && <p className="item-error">{error}</p>}
+      </div>
+    </Panel>
+  );
+}
+
 function MatrixImportPreviewModal({
   draft,
   loading,
@@ -1943,79 +2118,93 @@ function ContentPlanPreviewModal({
   onExport: () => void;
 }) {
   const summary = plan.summary || {};
+  const planSourceLabel = plan.source === "demand_matrix" ? "需求驱动矩阵" : "内容矩阵";
+  const markdownReport = typeof plan.markdown_report === "string" ? plan.markdown_report.trim() : "";
   return (
     <div className="modal-backdrop content-plan-backdrop" role="presentation">
       <div className="content-plan-modal" role="dialog" aria-modal="true" aria-labelledby="content-plan-title">
         <div className="detail-head">
           <div>
-            <span className="detail-kicker">内容矩阵 / 内容规划报告</span>
+            <span className="detail-kicker">{planSourceLabel} / 内容规划报告</span>
             <h2 id="content-plan-title">{plan.project_name}</h2>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="关闭"><X size={18} /></button>
         </div>
         <div className="content-plan-preview">
-          <section className="content-plan-section">
-            <div className="content-plan-section-head">
-              <strong>项目摘要</strong>
-              <span>生成时间：{plan.generated_at}</span>
-            </div>
-            <div className="content-plan-kv">
-              <ContentPlanKv label="目标品牌" value={summary.target_brand} />
-              <ContentPlanKv label="产品/方案" value={summary.target_product_or_solution} />
-              <ContentPlanKv label="行业/品类" value={[summary.target_industry, summary.target_category].filter(Boolean).join(" / ")} />
-              <ContentPlanKv label="竞品" value={summary.competitors} />
-              <ContentPlanKv label="关键词" value={`${summary.target_keywords_count || 0} 个`} />
-              <ContentPlanKv label="文章规划" value={`${summary.total_plans || 0} 篇`} />
-          <ContentPlanKv label="文章类型" value={`${summary.article_type_count || 0} 类`} />
-          <ContentPlanKv label="全局证据缺口" value={`${summary.evidence_gap_count || 0} 项`} />
-            </div>
-          </section>
-          <ContentPlanTable
-            title="关键词意图簇"
-            tableKey="intent-groups"
-            rows={plan.keyword_intent_groups}
-            columns={[
-              ["name", "意图簇"],
-              ["keywords", "关键词"],
-              ["user_stage", "用户阶段"],
-              ["user_question", "AI 需要回答的问题"],
-              ["recommendation_logic", "推荐逻辑/主攻类型"]
-            ]}
-          />
-          <ContentPlanTable
-            title="文章类型池"
-            tableKey="article-type-pool"
-            rows={plan.article_type_pool}
-            columns={[
-              ["type", "文章类型"],
-              ["role", "核心作用"],
-              ["keywords", "覆盖关键词/意图簇"],
-              ["recommendation_strength", "推荐强度"],
-              ["count", "数量"]
-            ]}
-          />
-          <ContentPlanTable
-            title="首轮内容规划"
-            tableKey="first-round-plans"
-            rows={plan.first_round_plans}
-            columns={[
-              ["intent_group", "意图簇"],
-              ["keyword", "关键词"],
-              ["type", "文章类型"],
-              ["title", "建议标题"],
-              ["role", "主要作用"],
-              ["required_evidence", "必备证据"],
-              ["priority", "优先级"]
-            ]}
-          />
-          <ContentPlanDisplaySections sections={plan.display_sections?.filter(section => section.id !== "warnings") || []} />
-          {plan.final_execution_advice && (
-            <section className="content-plan-section">
-              <div className="content-plan-section-head"><strong>最终执行建议</strong></div>
-              <p>{plan.final_execution_advice}</p>
+          {markdownReport ? (
+            <section className="content-plan-section content-plan-markdown-section">
+              <div className="content-plan-section-head">
+                <strong>完整规划报告</strong>
+                <span>生成时间：{plan.generated_at}</span>
+              </div>
+              <pre className="read-only-markdown content-plan-markdown-report">{markdownReport}</pre>
             </section>
+          ) : (
+            <>
+              <section className="content-plan-section">
+                <div className="content-plan-section-head">
+                  <strong>项目摘要</strong>
+                  <span>生成时间：{plan.generated_at}</span>
+                </div>
+                <div className="content-plan-kv">
+                  <ContentPlanKv label="目标品牌" value={summary.target_brand} />
+                  <ContentPlanKv label="产品/方案" value={summary.target_product_or_solution} />
+                  <ContentPlanKv label="行业/品类" value={[summary.target_industry, summary.target_category].filter(Boolean).join(" / ")} />
+                  <ContentPlanKv label="竞品" value={summary.competitors} />
+                  <ContentPlanKv label="关键词" value={`${summary.target_keywords_count || 0} 个`} />
+                  <ContentPlanKv label="文章规划" value={`${summary.total_plans || 0} 篇`} />
+                  <ContentPlanKv label="文章类型" value={`${summary.article_type_count || 0} 类`} />
+                  <ContentPlanKv label="全局证据缺口" value={`${summary.evidence_gap_count || 0} 项`} />
+                </div>
+              </section>
+              <ContentPlanTable
+                title="关键词意图簇"
+                tableKey="intent-groups"
+                rows={plan.keyword_intent_groups}
+                columns={[
+                  ["name", "意图簇"],
+                  ["keywords", "关键词"],
+                  ["user_stage", "用户阶段"],
+                  ["user_question", "AI 需要回答的问题"],
+                  ["recommendation_logic", "推荐逻辑/主攻类型"]
+                ]}
+              />
+              <ContentPlanTable
+                title="文章类型池"
+                tableKey="article-type-pool"
+                rows={plan.article_type_pool}
+                columns={[
+                  ["type", "文章类型"],
+                  ["role", "核心作用"],
+                  ["keywords", "覆盖关键词/意图簇"],
+                  ["recommendation_strength", "推荐强度"],
+                  ["count", "数量"]
+                ]}
+              />
+              <ContentPlanTable
+                title="首轮内容规划"
+                tableKey="first-round-plans"
+                rows={plan.first_round_plans}
+                columns={[
+                  ["intent_group", "意图簇"],
+                  ["keyword", "关键词"],
+                  ["type", "文章类型"],
+                  ["title", "建议标题"],
+                  ["role", "主要作用"],
+                  ["required_evidence", "必备证据"],
+                  ["priority", "优先级"]
+                ]}
+              />
+              <ContentPlanDisplaySections sections={plan.display_sections?.filter(section => section.id !== "warnings") || []} />
+              {plan.final_execution_advice && (
+                <section className="content-plan-section">
+                  <div className="content-plan-section-head"><strong>最终执行建议</strong></div>
+                  <p>{plan.final_execution_advice}</p>
+                </section>
+              )}
+              <ContentPlanDisplaySections sections={plan.display_sections?.filter(section => section.id === "warnings") || []} />
+            </>
           )}
-          <ContentPlanDisplaySections sections={plan.display_sections?.filter(section => section.id === "warnings") || []} />
         </div>
         <div className="actions end">
           <button className="btn" onClick={onClose}>关闭</button>
@@ -2811,6 +3000,216 @@ function ArticleView(props: {
   );
 }
 
+function MarkdownImportView({
+  project,
+  data,
+  onImport,
+  busy,
+  setCurrent,
+  openDetail
+}: {
+  project: Project;
+  data: DerivedData;
+  onImport: (rows: Array<{ file: File; meta: MarkdownArticleImportMeta }>) => Promise<void>;
+  busy: boolean;
+  setCurrent: (view: AppView) => void;
+  openDetail: (item: ContentItem) => void;
+}) {
+  const [drafts, setDrafts] = useState<MarkdownImportDraft[]>([]);
+  const [error, setError] = useState("");
+  const keywordOptions = uniqueStrings([...data.plans, ...data.briefs, ...data.articles].map(item => item.keyword).filter(Boolean));
+  const typeOptions = coreArticleTypes;
+  const importedArticles = data.articles.filter(articleIsImportedMarkdown);
+  const validRows = drafts.filter(row => row.status === "ready" && row.title.trim() && row.keyword.trim() && row.type.trim());
+  const canSubmit = drafts.length > 0 && validRows.length === drafts.length && !busy;
+
+  async function handleFiles(files: FileList | null) {
+    setError("");
+    if (!files?.length) return;
+    const nextRows: MarkdownImportDraft[] = [];
+    for (const file of Array.from(files)) {
+      const id = `${file.name}-${file.size}-${file.lastModified}`;
+      if (!file.name.toLowerCase().endsWith(".md")) {
+        nextRows.push({
+          id,
+          file,
+          filename: file.name,
+          title: fileNameTitle(file.name),
+          keyword: "",
+          type: "",
+          status: "invalid",
+          error: "仅支持 .md 文件"
+        });
+        continue;
+      }
+      const markdown = await file.text();
+      const title = markdownH1Title(markdown) || fileNameTitle(file.name);
+      nextRows.push({
+        id,
+        file,
+        filename: file.name,
+        title,
+        keyword: "",
+        type: "",
+        status: markdown.trim() ? "ready" : "invalid",
+        error: markdown.trim() ? "" : "文件内容为空"
+      });
+    }
+    setDrafts(current => mergeImportDrafts(current, nextRows));
+  }
+
+  function updateDraft(id: string, patch: Partial<Pick<MarkdownImportDraft, "title" | "keyword" | "type">>) {
+    setDrafts(current => current.map(row => row.id === id ? { ...row, ...patch } : row));
+  }
+
+  function removeDraft(id: string) {
+    setDrafts(current => current.filter(row => row.id !== id));
+  }
+
+  async function submitImport() {
+    const invalid = drafts.find(row => row.status !== "ready" || !row.title.trim() || !row.keyword.trim() || !row.type.trim());
+    if (invalid) {
+      setError(`请补齐导入信息：${invalid.filename}`);
+      return;
+    }
+    setError("");
+    await onImport(drafts.map(row => ({
+      file: row.file,
+      meta: {
+        filename: row.filename,
+        title: row.title.trim(),
+        keyword: row.keyword.trim(),
+        type: row.type.trim()
+      }
+    })));
+    setDrafts([]);
+    setCurrent("library");
+  }
+
+  return (
+    <div className="section-stack">
+      <div className="bulk-bar import-summary">
+        <div>
+          <strong>批量导入 Markdown 定稿</strong>
+          <span>{drafts.length ? `已选择 ${drafts.length} 篇，${validRows.length} 篇信息完整。` : "选择本地 .md 文件后，逐篇补充关键词和文章类型。"}</span>
+        </div>
+        <div className="actions">
+          <label className="btn import-file-button">
+            <Upload size={15} />选择 Markdown
+            <input type="file" accept=".md,text/markdown,text/plain" multiple onChange={event => void handleFiles(event.target.files)} />
+          </label>
+          <button className="btn primary" disabled={!canSubmit} onClick={() => void submitImport()}><CheckCircle2 size={15} />导入定稿</button>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-head">
+          <div><h2>待导入文章</h2><p>{project.name} · 导入后自动标记为已审核正文，发布平台同步后可发布。</p></div>
+          {drafts.length > 0 && <button className="btn" onClick={() => setDrafts([])}><Trash2 size={15} />清空</button>}
+        </div>
+        <div className="panel-body">
+          {drafts.length ? (
+            <div className="table-wrap import-table-wrap">
+              <table className="import-table">
+                <colgroup>
+                  <col className="import-col-file" />
+                  <col className="import-col-title" />
+                  <col className="import-col-keyword" />
+                  <col className="import-col-type" />
+                  <col className="import-col-status" />
+                  <col className="import-col-action" />
+                </colgroup>
+                <thead><tr><th>文件名</th><th>标题</th><th>关键词</th><th>文章类型</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody>
+                  {drafts.map(row => (
+                    <tr key={row.id} className={row.status === "invalid" ? "import-row-invalid" : ""}>
+                      <td><strong>{row.filename}</strong></td>
+                      <td>
+                        <input className="import-input" value={row.title} placeholder="文章标题" onChange={event => updateDraft(row.id, { title: event.target.value })} />
+                      </td>
+                      <td>
+                        <input
+                          className="import-input"
+                          value={row.keyword}
+                          list="markdown-import-keywords"
+                          placeholder="输入关键词"
+                          onChange={event => updateDraft(row.id, { keyword: event.target.value })}
+                        />
+                      </td>
+                      <td>
+                        <select
+                          className="import-input"
+                          value={row.type}
+                          onChange={event => updateDraft(row.id, { type: event.target.value })}
+                        >
+                          <option value="">请选择文章类型</option>
+                          {typeOptions.map(type => <option key={type} value={type}>{type}</option>)}
+                        </select>
+                      </td>
+                      <td>
+                        <span className={`chip ${row.status === "ready" && row.title && row.keyword && row.type ? "good" : "warn"}`}>
+                          {row.status === "invalid" ? row.error : row.title && row.keyword && row.type ? "可导入" : "待补充"}
+                        </span>
+                      </td>
+                      <td><button className="import-remove-btn" onClick={() => removeDraft(row.id)}>移除</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <datalist id="markdown-import-keywords">
+                {keywordOptions.map(keyword => <option key={keyword} value={keyword} />)}
+              </datalist>
+            </div>
+          ) : (
+            <EmptyPanelText text="暂无待导入文章。请点击“选择 Markdown”上传本地 .md 文件。" />
+          )}
+          {error && <p className="item-error">{error}</p>}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <div><h2>已导入文章</h2><p>{project.name} · 共 {importedArticles.length} 篇本地 Markdown 定稿。</p></div>
+          <button className="btn" disabled={!importedArticles.length} onClick={() => setCurrent("library")}><Archive size={15} />查看归档</button>
+        </div>
+        <div className="panel-body">
+          {importedArticles.length ? (
+            <div className="table-wrap import-table-wrap">
+              <table className="import-table imported-article-table">
+                <colgroup>
+                  <col className="imported-col-title" />
+                  <col className="imported-col-keyword" />
+                  <col className="imported-col-type" />
+                  <col className="imported-col-file" />
+                  <col className="imported-col-time" />
+                  <col className="imported-col-status" />
+                  <col className="imported-col-action" />
+                </colgroup>
+                <thead><tr><th>标题</th><th>关键词</th><th>文章类型</th><th>源文件</th><th>导入时间</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody>
+                  {importedArticles.map(item => (
+                    <tr key={item.id}>
+                      <td><strong>{item.title}</strong></td>
+                      <td><Chip text={item.keyword || "未填写"} type="brand" className="keyword-chip" /></td>
+                      <td><Chip text={item.type || "未填写"} className="type-chip" /></td>
+                      <td><span className="imported-source-file">{importedArticleFilename(item)}</span></td>
+                      <td>{timestampLabel(importedArticleImportedAt(item)) || "-"}</td>
+                      <td><span className="chip good">已入库</span></td>
+                      <td><button className="btn compact" onClick={() => openDetail(item)}><BookOpen size={15} />查阅</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyPanelText text="暂无已导入文章。导入成功后会在这里展示，并同步出现在定稿归档。" />
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function LibraryView({ project, data, selectedArticles, setSelectedArticles, openDetail }: {
   project: Project;
   data: DerivedData;
@@ -2907,6 +3306,7 @@ function LibraryView({ project, data, selectedArticles, setSelectedArticles, ope
         <div className="article-list">
           {filteredItems.map(item => {
             const boundBrief = briefById.get(item.briefId || "");
+            const importedArticle = articleIsImportedMarkdown(item);
             return (
               <article className={`article-collapse ${articleReviewCardClass(item, boundBrief)}`} key={item.id}>
                 <div className="article-card-head">
@@ -2918,7 +3318,11 @@ function LibraryView({ project, data, selectedArticles, setSelectedArticles, ope
                     <div className="chips meta-chips review-meta-chips">
                       <Chip text={item.keyword} type="brand" className="keyword-chip" />
                       <Chip text={item.type} className="type-chip" />
-                      {boundBrief && <Chip text="已绑定 Brief" type="good" className="state-chip" />}
+                      {importedArticle ? (
+                        <Chip text="自定义导入" type="good" className="state-chip" />
+                      ) : boundBrief ? (
+                        <Chip text="已绑定 Brief" type="good" className="state-chip" />
+                      ) : null}
                       <ItemStatusChip status={item.status} className="state-chip" />
                     </div>
                   </div>
@@ -2945,18 +3349,20 @@ function PlanGroupAside({
   rows,
   selectedPlans,
   expanded,
+  readOnly = false,
   onSelectionChange,
   onToggleExpanded
 }: {
   rows: ContentItem[];
   selectedPlans: Set<string>;
   expanded: boolean;
+  readOnly?: boolean;
   onSelectionChange: (rows: ContentItem[], selected: boolean) => void;
   onToggleExpanded: () => void;
 }) {
   return (
     <div className="plan-group-actions">
-      <GroupSelectAside rows={rows} selectedPlans={selectedPlans} onChange={onSelectionChange} />
+      {readOnly ? <Chip text={`${rows.length} 条`} /> : <GroupSelectAside rows={rows} selectedPlans={selectedPlans} onChange={onSelectionChange} />}
       <button className={`btn compact dropdown-toggle ${expanded ? "open" : ""}`} onClick={onToggleExpanded}>
         <ChevronDown size={15} />
         {expanded ? "收起" : "展开"}
@@ -2995,6 +3401,7 @@ function GroupSelectAside({
 function PlanRow({
   item,
   selected,
+  readOnly = false,
   brief,
   article,
   onToggle,
@@ -3006,6 +3413,7 @@ function PlanRow({
 }: {
   item: ContentItem;
   selected: boolean;
+  readOnly?: boolean;
   brief?: ContentItem;
   article?: ContentItem;
   onToggle: () => void;
@@ -3017,18 +3425,18 @@ function PlanRow({
 }) {
   return (
     <article className={`plan-row ${planReviewCardClass(brief, article)} ${selected ? "selected" : ""}`}>
-      <input type="checkbox" checked={selected} onChange={onToggle} />
+      {!readOnly && <input type="checkbox" checked={selected} onChange={onToggle} />}
       <div>
         <h3>{item.type}｜{item.title}</h3>
         <p>{item.role}</p>
         <div className="chips meta-chips plan-meta-chips">
           <Chip text={item.keyword} type="brand" className="keyword-chip" />
           <Chip text={item.channel} className="channel-chip" />
-          <PlanBriefStatusChip status={brief?.status} />
+          {readOnly ? <Chip text="仅查看" /> : <PlanBriefStatusChip status={brief?.status} />}
         </div>
       </div>
       <div className="row-actions">
-        {onOpen && <button className="btn" onClick={onOpen}><BookOpen size={15} />查阅/编辑</button>}
+        {onOpen && <button className="btn" onClick={onOpen}><BookOpen size={15} />{readOnly ? "查阅" : "查阅/编辑"}</button>}
         {onCopy && <button className="btn" onClick={onCopy}><Copy size={15} />复制为自定义</button>}
         {onEdit && <button className="btn" disabled={editDisabled} title={editDisabled ? "已生成 Brief 后请在 Brief 审核页修改" : ""} onClick={onEdit}><PenLine size={15} />编辑</button>}
         {onDelete && <button className="btn" onClick={onDelete}><Trash2 size={15} />删除</button>}
@@ -3258,7 +3666,7 @@ function ItemDetailModal({
   const [reviewNotes, setReviewNotes] = useState(detail.item.reviewNotes || "");
   const [copied, setCopied] = useState(false);
   const isAuditMode = detail.step === "article" && detail.mode === "audit";
-  const isReadOnlyMode = detail.mode === "read";
+  const isReadOnlyMode = detail.mode === "read" || detail.step === "demand_matrix";
   const canEditMarkdown = !isAuditMode && !isReadOnlyMode && (detail.step === "brief" || detail.step === "article");
   const fullText = markdown || JSON.stringify(detail.item.raw, null, 2);
   const readOnlyText = fullText.trim();
@@ -3281,7 +3689,7 @@ function ItemDetailModal({
       <div className={`detail-modal ${isReadOnlyMode ? "read-only-detail" : ""}`} role="dialog" aria-modal="true" aria-labelledby="item-detail-title">
         <div className="detail-head">
           <div>
-            <span className="detail-kicker">{isAuditMode ? "正文审核" : isReadOnlyMode ? "定稿归档" : stepLabel(detail.step)} / {detail.item.keyword}</span>
+            <span className="detail-kicker">{isAuditMode ? "正文审核" : stepLabel(detail.step)} / {detail.item.keyword}</span>
             <h2 id="item-detail-title">{detail.item.title}</h2>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="关闭"><X size={16} /></button>
@@ -3306,7 +3714,7 @@ function ItemDetailModal({
             <pre className="read-only-markdown">{readOnlyText}</pre>
           </section>
         ) : (
-          <label className="field-block">
+          <label className="field-block markdown-edit-block">
             <span>{detail.step === "brief" || detail.step === "article" ? "完整 Markdown" : "完整规划数据"}</span>
             <textarea
               value={fullText}
@@ -3367,6 +3775,8 @@ interface DerivedData {
   intakeRows: IntakeRow[];
   matrixPlans: ContentItem[];
   matrixIntentGroups: MatrixIntentGroup[];
+  demandMatrixPlans: ContentItem[];
+  demandMatrixIntentGroups: MatrixIntentGroup[];
   breakthroughPlans: ContentItem[];
   customPlans: ContentItem[];
   matrixKeywords: string[];
@@ -3378,12 +3788,14 @@ interface DerivedData {
 }
 
 function emptyDerivedData(): DerivedData {
-  return { intakeRows: [], matrixPlans: [], matrixIntentGroups: [], breakthroughPlans: [], customPlans: [], matrixKeywords: [], confirmedBreakthroughKeywords: [], plans: [], briefs: [], articles: [], archiveCount: 0 };
+  return { intakeRows: [], matrixPlans: [], matrixIntentGroups: [], demandMatrixPlans: [], demandMatrixIntentGroups: [], breakthroughPlans: [], customPlans: [], matrixKeywords: [], confirmedBreakthroughKeywords: [], plans: [], briefs: [], articles: [], archiveCount: 0 };
 }
 
 function deriveProjectData(project: Project): DerivedData {
   const matrixPlans = normalizeItems(project.steps.matrix.output, "matrix").filter(item => isCoreArticleType(item.type));
   const matrixIntentGroups = normalizeMatrixIntentGroups(project.steps.matrix.output, matrixPlans);
+  const demandMatrixPlans = normalizeItems(project.steps.demand_matrix?.output || {}, "demand_matrix").filter(item => isCoreArticleType(item.type));
+  const demandMatrixIntentGroups = normalizeMatrixIntentGroups(project.steps.demand_matrix?.output || {}, demandMatrixPlans);
   const matrixKeywordOptions = extractMatrixKeywordOptions(project.steps.matrix.output);
   const breakthroughPlans = normalizeItems(project.steps.breakthrough.output, "breakthrough").filter(item => isCoreArticleType(item.type));
   const customPlans = normalizeItems({ items: project.custom_sources || [] }, "custom");
@@ -3394,6 +3806,8 @@ function deriveProjectData(project: Project): DerivedData {
     intakeRows: normalizeIntake(project.steps.intake.output),
     matrixPlans,
     matrixIntentGroups,
+    demandMatrixPlans,
+    demandMatrixIntentGroups,
     breakthroughPlans,
     customPlans,
     matrixKeywords: matrixKeywordOptions.length ? matrixKeywordOptions : uniqueKeywords(matrixPlans),
@@ -3478,17 +3892,34 @@ function dashboardSummary(project: Project, data: DerivedData, keywordCount: num
   const profile = isRecord(project.steps.matrix.output.project) ? project.steps.matrix.output.project : {};
   const brand = readString(profile, ["target_brand", "brand", "目标品牌"], "");
   const product = readString(profile, ["target_product_or_solution", "target_product", "product", "目标产品", "解决方案"], "");
+  const profileKeywords = readStringList(profile, [
+    "main_keywords",
+    "target_keywords",
+    "keywords",
+    "主要关键词",
+    "目标关键词",
+    "关键词"
+  ]);
   return {
     title: project.name,
     brand,
     product,
-    industry: readString(profile, ["target_industry", "industry", "行业"], ""),
-    category: readString(profile, ["target_category", "category", "品类"], ""),
-    competitors: readStringList(profile, ["competitors", "competitor", "竞品", "对比对象"]),
+    mainKeywords: dashboardMainKeywords(data, profileKeywords),
     keywordCount,
     totalPlans: data.plans.length,
     period: projectPeriodLabel(project, data.intakeRows)
   };
+}
+
+function dashboardMainKeywords(data: DerivedData, profileKeywords: string[]): string[] {
+  const intakeKeywords = data.intakeRows
+    .filter(row => /关键词/.test(row.field))
+    .flatMap(row => row.value.split(/[、，,;；\n]/).map(item => item.trim()));
+  return uniqueStrings([
+    ...data.matrixKeywords,
+    ...profileKeywords,
+    ...intakeKeywords
+  ]).filter(keyword => keyword && keyword !== "未标注关键词");
 }
 
 function projectPeriodLabel(project: Project, intakeRows: IntakeRow[]): string {
@@ -3723,6 +4154,25 @@ function articleAuditStatusLabel(article: ContentItem): string {
   return articleAuditApproved(article) ? "已审核正文" : "暂未审核正文";
 }
 
+function articleIsImportedMarkdown(article: ContentItem): boolean {
+  return article.sourceStep === "imported" || isRecord(article.raw.imported_from);
+}
+
+function importedArticleFilename(article: ContentItem): string {
+  const importedFrom = article.raw.imported_from;
+  if (!isRecord(importedFrom)) return "本地 Markdown";
+  return readString(importedFrom, ["filename", "file_name", "name"], "本地 Markdown");
+}
+
+function importedArticleImportedAt(article: ContentItem): string {
+  const importedFrom = article.raw.imported_from;
+  if (isRecord(importedFrom)) {
+    const importedAt = readString(importedFrom, ["imported_at", "importedAt"], "");
+    if (importedAt) return importedAt;
+  }
+  return article.articleAuditedAt || readString(article.raw, ["article_audited_at", "articleAuditedAt"], "");
+}
+
 function itemIsUsed(item: ContentItem): boolean {
   const used = `${item.used || readString(item.raw, ["used", "使用状态"], "")}`.trim();
   if (!used || used === "未使用") return false;
@@ -3756,11 +4206,40 @@ function matrixContentPlanSummary(project: Project, data: DerivedData) {
   };
 }
 
+function demandMatrixContentPlanSummary(project: Project, data: DerivedData) {
+  const output = project.steps.demand_matrix?.output || {};
+  return {
+    keywordCount: uniqueKeywords(data.demandMatrixPlans).length,
+    planCount: data.demandMatrixPlans.length,
+    articleTypeCount: orderedArticleTypes(data.demandMatrixPlans).length,
+    demandVariableCount: contentPlanSectionCount(output.demand_variables),
+    themeClusterCount: contentPlanSectionCount(output.content_theme_clusters),
+    evidenceGapCount: contentPlanSectionCount(output.evidence_gaps),
+    hasSchedule: contentPlanSectionCount(output.weekly_publishing_mix) > 0 || contentPlanSectionCount(output.monthly_publishing_mix) > 0
+  };
+}
+
 function matrixImportPrerequisitesReady(project: Project): boolean {
   const materialStatus = project.steps.materials?.status;
   const intakeStatus = project.steps.intake?.status;
   const readyStatuses = new Set(["completed", "confirmed"]);
   return readyStatuses.has(materialStatus) && readyStatuses.has(intakeStatus);
+}
+
+function demandMatrixPrerequisitesReady(project: Project): boolean {
+  const readyStatuses = new Set(["completed", "confirmed"]);
+  return readyStatuses.has(project.steps.materials?.status)
+    && readyStatuses.has(project.steps.intake?.status)
+    && project.materials.some(material => material.filename.startsWith("demand_report__") && material.status === "parsed");
+}
+
+function demandMatrixPrerequisiteMessage(project: Project): string {
+  const readyStatuses = new Set(["completed", "confirmed"]);
+  if (!readyStatuses.has(project.steps.materials?.status)) return "请先上传并解析资料。";
+  if (!readyStatuses.has(project.steps.intake?.status)) return "请先生成项目信息抽取表。";
+  const hasReport = project.materials.some(material => material.filename.startsWith("demand_report__"));
+  if (!hasReport) return "请先在“用户需求挖掘报告”入口上传报告并解析。";
+  return "用户需求挖掘报告尚未解析完成，请先解析资料。";
 }
 
 function contentPlanSectionCount(value: unknown): number {
@@ -3802,6 +4281,24 @@ function uniqueStrings(values: unknown[]): string[] {
     seen.add(normalized);
   });
   return result;
+}
+
+function markdownH1Title(markdown: string): string {
+  for (const line of markdown.split(/\r?\n/)) {
+    const value = line.trim();
+    if (value.startsWith("# ") && !value.startsWith("## ")) return value.slice(2).trim();
+  }
+  return "";
+}
+
+function fileNameTitle(filename: string): string {
+  return filename.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || filename;
+}
+
+function mergeImportDrafts(current: MarkdownImportDraft[], nextRows: MarkdownImportDraft[]): MarkdownImportDraft[] {
+  const byId = new Map(current.map(row => [row.id, row]));
+  nextRows.forEach(row => byId.set(row.id, row));
+  return Array.from(byId.values());
 }
 
 function normalizeIntake(output: AnyRecord): DerivedData["intakeRows"] {
@@ -3886,17 +4383,31 @@ function normalizeItems(output: AnyRecord, step: string): ContentItem[] {
 }
 
 function sortBriefsNewestFirst(items: ContentItem[]): ContentItem[] {
-  return items
-    .map((item, index) => ({ item, index, generatedAt: itemGeneratedAtMs(item) }))
-    .sort((left, right) => right.generatedAt - left.generatedAt || right.index - left.index)
-    .map(entry => entry.item);
+  return sortReviewItemsNewestFirst(items);
 }
 
 function sortArticlesNewestFirst(items: ContentItem[]): ContentItem[] {
+  return sortReviewItemsNewestFirst(items);
+}
+
+function sortReviewItemsNewestFirst(items: ContentItem[]): ContentItem[] {
   return items
-    .map((item, index) => ({ item, index, generatedAt: itemGeneratedAtMs(item) }))
-    .sort((left, right) => right.generatedAt - left.generatedAt || right.index - left.index)
+    .map((item, index) => ({
+      item,
+      index,
+      runningRank: reviewItemRunningRank(item),
+      generatedAt: itemGeneratedAtMs(item)
+    }))
+    .sort((left, right) =>
+      right.runningRank - left.runningRank
+      || right.generatedAt - left.generatedAt
+      || right.index - left.index
+    )
     .map(entry => entry.item);
+}
+
+function reviewItemRunningRank(item: ContentItem): number {
+  return ["queued", "running", "cancelling", "pending"].includes(item.status) ? 1 : 0;
 }
 
 function itemGeneratedAtMs(item: ContentItem): number {
@@ -4332,6 +4843,7 @@ function stepLabel(step: string): string {
     materials: "资料解析",
     intake: "抽取表",
     matrix: "内容矩阵",
+    demand_matrix: "需求驱动矩阵",
     breakthrough: "逐词击破",
     custom: "自定义文章",
     brief: "Brief",

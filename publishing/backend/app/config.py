@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     publishing_data_dir: str = "app-data/publishing"
+    publishing_database_url: str = ""
     publishing_admin_username: str = "admin"
     publishing_admin_password: str = "admin123"
     publishing_admin_display_name: str = "系统管理员"
@@ -34,6 +35,12 @@ class Settings(BaseSettings):
     @property
     def database_path(self) -> Path:
         return self.data_root / "publishing.db"
+
+    @property
+    def database_url(self) -> str:
+        if self.publishing_database_url:
+            return self.publishing_database_url
+        return f"sqlite:///{self.database_path}"
 
 
 @lru_cache

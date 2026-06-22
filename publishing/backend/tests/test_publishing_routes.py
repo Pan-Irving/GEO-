@@ -169,3 +169,153 @@ def test_current_admin_cannot_deactivate_self(tmp_path: Path):
 
     assert result.status_code == 400
     assert result.json()["detail"] == "不能停用当前登录账号。"
+
+
+def test_employee_record_routes_only_return_own_records(tmp_path: Path):
+    client, publishing_store = make_client(tmp_path)
+    publishing_store.upsert_articles([
+        article_payload("article-1"),
+        {**article_payload("article-2"), "keyword": "高端洗碗机"},
+    ])
+    li = publishing_store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    zhang = publishing_store.create_user({"username": "zhang", "password": "secret123", "display_name": "张三", "role": "employee"})
+    for employee in (li, zhang):
+        publishing_store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+
+    li_token = publishing_store.login("li", "secret123")["token"]
+    zhang_token = publishing_store.login("zhang", "secret123")["token"]
+    admin_headers = auth_headers(publishing_store)
+
+    li_record = publishing_store.create_self_publication(
+        li,
+        {
+            "article_id": "article-1",
+            "media_name": "知乎",
+            "target_ai_platforms": ["豆包"],
+            "publish_url": "https://example.com/li",
+        },
+    )
+    zhang_record = publishing_store.create_web_publication(
+        zhang,
+        {
+            "article_id": "article-2",
+            "media_category": "垂直媒体",
+            "media_name": "家居垂直媒体",
+            "target_ai_platforms": ["DeepSeek"],
+        },
+    )
+
+    li_headers = {"Authorization": f"Bearer {li_token}"}
+    zhang_headers = {"Authorization": f"Bearer {zhang_token}"}
+    li_records = client.get("/api/projects/project-1/records", headers=li_headers)
+    zhang_records = client.get("/api/projects/project-1/records", headers=zhang_headers)
+    admin_records = client.get("/api/projects/project-1/records", headers=admin_headers)
+
+    assert [record["id"] for record in li_records.json()["records"]] == [li_record["id"]]
+    assert [record["id"] for record in zhang_records.json()["records"]] == [zhang_record["id"]]
+    assert {record["id"] for record in admin_records.json()["records"]} == {li_record["id"], zhang_record["id"]}
+
+    li_inventory = client.get("/api/projects/project-1/inventory", headers=li_headers).json()
+    admin_inventory = client.get("/api/projects/project-1/inventory", headers=admin_headers).json()
+    assert li_inventory["totals"] == {"articles": 2, "available": 1, "published": 1, "purchasing": 0}
+    assert admin_inventory["totals"] == {"articles": 2, "available": 0, "published": 1, "purchasing": 1}
+
+    li_usage = client.get("/api/projects/project-1/usage-summary", headers=li_headers)
+    public_usage = client.get("/api/projects/project-1/usage-summary")
+    assert li_usage.json()["totals"] == li_inventory["totals"]
+    assert public_usage.json()["totals"] == admin_inventory["totals"]
+
+
+def test_employee_can_update_and_delete_own_publication_routes(tmp_path: Path):
+    client, publishing_store = make_client(tmp_path)
+    publishing_store.upsert_articles([article_payload("article-1")])
+    employee = publishing_store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    publishing_store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    record = publishing_store.create_self_publication(
+        employee,
+        {
+            "article_id": "article-1",
+            "media_name": "知乎",
+            "target_ai_platforms": ["豆包"],
+            "publish_url": "https://example.com/old",
+        },
+    )
+    headers = {"Authorization": f"Bearer {publishing_store.login('li', 'secret123')['token']}"}
+
+    updated = client.patch(
+        f"/api/publications/{record['id']}",
+        headers=headers,
+        json={"media_name": "百家号", "publish_url": "https://example.com/new", "target_ai_platforms": ["DeepSeek"]},
+    )
+    invalid = client.patch(
+        f"/api/publications/{record['id']}",
+        headers=headers,
+        json={"target_ai_platforms": []},
+    )
+    deleted = client.delete(f"/api/publications/{record['id']}", headers=headers)
+    inventory = client.get("/api/projects/project-1/inventory", headers=headers).json()
+
+    assert updated.status_code == 200
+    assert updated.json()["record"]["media_name"] == "百家号"
+    assert updated.json()["record"]["target_ai_platforms"] == ["DeepSeek"]
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "至少选择一个 AI 平台。"
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+    assert inventory["totals"] == {"articles": 1, "available": 1, "published": 0, "purchasing": 0}
+
+
+def test_admin_can_update_web_publication_ai_platforms_route(tmp_path: Path):
+    client, publishing_store = make_client(tmp_path)
+    publishing_store.upsert_articles([article_payload("article-1")])
+    employee = publishing_store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    publishing_store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    record = publishing_store.create_web_publication(
+        employee,
+        {
+            "article_id": "article-1",
+            "media_category": "垂直媒体",
+            "media_name": "家居媒体",
+            "target_ai_platforms": ["DeepSeek"],
+        },
+    )
+
+    updated = client.patch(
+        f"/api/publications/{record['id']}",
+        headers=auth_headers(publishing_store),
+        json={
+            "media_name": "中国家电网",
+            "publish_url": "https://example.com/web",
+            "actual_cost": 800,
+            "target_ai_platforms": ["豆包", "DeepSeek"],
+            "order_status": "published",
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["record"]["media_name"] == "中国家电网"
+    assert updated.json()["record"]["actual_cost"] == 800
+    assert updated.json()["record"]["target_ai_platforms"] == ["豆包", "DeepSeek"]
+
+
+def test_employee_cannot_delete_other_employee_publication_route(tmp_path: Path):
+    client, publishing_store = make_client(tmp_path)
+    publishing_store.upsert_articles([article_payload("article-1")])
+    li = publishing_store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    zhang = publishing_store.create_user({"username": "zhang", "password": "secret123", "display_name": "张三", "role": "employee"})
+    for employee in (li, zhang):
+        publishing_store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    record = publishing_store.create_self_publication(
+        zhang,
+        {
+            "article_id": "article-1",
+            "media_name": "知乎",
+            "target_ai_platforms": ["豆包"],
+            "publish_url": "https://example.com/zhang",
+        },
+    )
+    li_headers = {"Authorization": f"Bearer {publishing_store.login('li', 'secret123')['token']}"}
+
+    result = client.delete(f"/api/publications/{record['id']}", headers=li_headers)
+
+    assert result.status_code == 403

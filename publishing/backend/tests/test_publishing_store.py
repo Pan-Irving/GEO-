@@ -175,6 +175,53 @@ def test_self_publication_counts_as_published_and_blocks_duplicate_url(tmp_path:
         )
 
 
+def test_employee_records_and_inventory_only_count_own_publications(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([
+        article_payload("article-1", "关键词 A", "榜单推荐文"),
+        article_payload("article-2", "关键词 B", "榜单推荐文"),
+    ])
+    admin = store.login("admin", "secret123")["user"]
+    li = store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    zhang = store.create_user({"username": "zhang", "password": "secret123", "display_name": "张三", "role": "employee"})
+    for employee in (li, zhang):
+        store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+
+    li_record = store.create_self_publication(
+        li,
+        {
+            "article_id": "article-1",
+            "media_name": "知乎",
+            "target_ai_platforms": ["豆包"],
+            "publish_url": "https://example.com/li",
+        },
+    )
+    zhang_record = store.create_web_publication(
+        zhang,
+        {
+            "article_id": "article-2",
+            "media_category": "垂直媒体",
+            "media_name": "家居垂直媒体",
+            "target_ai_platforms": ["DeepSeek"],
+        },
+    )
+
+    assert [record["id"] for record in store.records_for_project("project-1", li)] == [li_record["id"]]
+    assert [record["id"] for record in store.records_for_project("project-1", zhang)] == [zhang_record["id"]]
+    assert {record["id"] for record in store.records_for_project("project-1", admin)} == {li_record["id"], zhang_record["id"]}
+
+    li_inventory = store.inventory("project-1", li)
+    zhang_inventory = store.inventory("project-1", zhang)
+    admin_inventory = store.inventory("project-1", admin)
+    assert li_inventory["totals"] == {"articles": 2, "available": 1, "published": 1, "purchasing": 0}
+    assert zhang_inventory["totals"] == {"articles": 2, "available": 1, "published": 0, "purchasing": 1}
+    assert admin_inventory["totals"] == {"articles": 2, "available": 0, "published": 1, "purchasing": 1}
+
+    assert store.usage_summary("project-1", li)["totals"] == li_inventory["totals"]
+    assert store.usage_summary("project-1", admin)["totals"] == admin_inventory["totals"]
+    assert store.usage_summary("project-1")["totals"] == admin_inventory["totals"]
+
+
 def test_web_publication_is_purchasing_until_admin_marks_published(tmp_path: Path):
     store = make_store(tmp_path)
     store.upsert_articles([article_payload()])
@@ -188,6 +235,7 @@ def test_web_publication_is_purchasing_until_admin_marks_published(tmp_path: Pat
             "article_id": "article-1",
             "media_category": "垂直媒体",
             "media_name": "家居垂直媒体",
+            "publisher": "媒介供应商 A",
             "target_ai_platforms": ["DeepSeek"],
             "reference_url": "https://example.com/reference",
         },
@@ -195,6 +243,7 @@ def test_web_publication_is_purchasing_until_admin_marks_published(tmp_path: Pat
 
     summary = store.usage_summary("project-1")
     assert record["order_status"] == "purchasing"
+    assert "发稿方：媒介供应商 A" in record["note"]
     assert summary["totals"]["purchasing"] == 1
     assert summary["totals"]["published"] == 0
     assert summary["totals"]["available"] == 0
@@ -208,12 +257,14 @@ def test_web_publication_is_purchasing_until_admin_marks_published(tmp_path: Pat
             "media_name": "中国家电网",
             "publish_url": "https://example.com/published",
             "actual_cost": 1800,
+            "target_ai_platforms": ["豆包", "DeepSeek"],
             "order_status": "published",
         },
     )
 
     assert updated["order_status"] == "published"
     assert updated["actual_cost"] == 1800
+    assert updated["target_ai_platforms"] == ["豆包", "DeepSeek"]
     completed_summary = store.usage_summary("project-1")
     assert completed_summary["totals"]["published"] == 1
     assert completed_summary["totals"]["available"] == 0
@@ -239,3 +290,74 @@ def test_admin_cannot_complete_web_publication_with_invalid_status_or_negative_c
         store.update_publication(record["id"], {"order_status": "done"})
     with pytest.raises(ValueError):
         store.update_publication(record["id"], {"actual_cost": -1})
+    with pytest.raises(ValueError, match="至少选择一个 AI 平台"):
+        store.update_publication(record["id"], {"target_ai_platforms": []})
+
+
+def test_employee_can_update_own_self_publication_but_not_others(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([
+        article_payload("article-1", "关键词 A", "榜单推荐文"),
+        article_payload("article-2", "关键词 B", "榜单推荐文"),
+    ])
+    li = store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    zhang = store.create_user({"username": "zhang", "password": "secret123", "display_name": "张三", "role": "employee"})
+    for employee in (li, zhang):
+        store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    li_record = store.create_self_publication(
+        li,
+        {"article_id": "article-1", "media_name": "知乎", "target_ai_platforms": ["豆包"], "publish_url": "https://example.com/li-old"},
+    )
+    zhang_record = store.create_self_publication(
+        zhang,
+        {"article_id": "article-2", "media_name": "搜狐号", "target_ai_platforms": ["豆包"], "publish_url": "https://example.com/zhang"},
+    )
+
+    updated = store.update_publication_for_user(
+        li_record["id"],
+        li,
+        {"media_name": "百家号", "publish_url": "https://example.com/li-new", "target_ai_platforms": ["DeepSeek"], "note": "修正链接"},
+    )
+
+    assert updated["media_name"] == "百家号"
+    assert updated["publish_url"] == "https://example.com/li-new"
+    assert updated["target_ai_platforms"] == ["DeepSeek"]
+    assert updated["order_status"] == "published"
+    with pytest.raises(PermissionError):
+        store.update_publication_for_user(zhang_record["id"], li, {"publish_url": "https://example.com/hack"})
+
+
+def test_employee_cannot_update_web_publication_but_can_delete_own_record(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([article_payload()])
+    employee = store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    record = store.create_web_publication(
+        employee,
+        {"article_id": "article-1", "media_category": "垂直媒体", "media_name": "家居媒体", "target_ai_platforms": ["DeepSeek"]},
+    )
+
+    with pytest.raises(PermissionError):
+        store.update_publication_for_user(record["id"], employee, {"order_status": "published", "publish_url": "https://example.com/a"})
+
+    store.delete_publication_for_user(record["id"], employee)
+
+    assert store.usage_summary("project-1")["totals"] == {"articles": 1, "available": 1, "published": 0, "purchasing": 0}
+    with pytest.raises(FileNotFoundError):
+        store.get_record(record["id"])
+
+
+def test_admin_can_delete_any_publication(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([article_payload()])
+    admin = store.login("admin", "secret123")["user"]
+    employee = store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    record = store.create_self_publication(
+        employee,
+        {"article_id": "article-1", "media_name": "知乎", "target_ai_platforms": ["豆包"], "publish_url": "https://example.com/a"},
+    )
+
+    store.delete_publication_for_user(record["id"], admin)
+
+    assert store.usage_summary("project-1")["totals"]["available"] == 1

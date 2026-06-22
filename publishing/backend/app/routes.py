@@ -52,6 +52,7 @@ class WebPublicationRequest(BaseModel):
     media_category: str
     media_name: str = ""
     media_requirement: str = ""
+    publisher: str = ""
     target_ai_platforms: list[str]
     reference_url: str = ""
     note: str = ""
@@ -64,6 +65,7 @@ class PublicationUpdateRequest(BaseModel):
     actual_cost: float | None = None
     order_status: str | None = None
     published_at: str | None = None
+    target_ai_platforms: list[str] | None = None
     note: str | None = None
 
 
@@ -94,7 +96,7 @@ def admin_user(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
 def health(settings: Settings = Depends(get_settings)):
     return {
         "status": "ok",
-        "database": str(settings.database_path),
+        "database": settings.publishing_database_url or str(settings.database_path),
         "writing_api_base_url": settings.writing_api_base_url,
     }
 
@@ -228,8 +230,17 @@ def project_records(project_id: str, user: dict[str, Any] = Depends(current_user
 
 
 @router.get("/projects/{project_id}/usage-summary")
-def usage_summary(project_id: str, db: PublishingStore = Depends(store)):
-    return db.usage_summary(project_id)
+def usage_summary(
+    project_id: str,
+    token: str = Depends(token_from_header),
+    db: PublishingStore = Depends(store),
+):
+    if not token:
+        return db.usage_summary(project_id)
+    user = db.user_for_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录。")
+    return db.usage_summary(project_id, user)
 
 
 @router.get("/articles/{article_id}")
@@ -266,10 +277,29 @@ def create_web_publication(payload: WebPublicationRequest, user: dict[str, Any] 
 def update_publication(
     record_id: str,
     payload: PublicationUpdateRequest,
-    _: dict[str, Any] = Depends(admin_user),
+    user: dict[str, Any] = Depends(current_user),
     db: PublishingStore = Depends(store),
 ):
     try:
-        return {"record": db.update_publication(record_id, payload.model_dump(exclude_unset=True))}
-    except (ValueError, FileNotFoundError) as exc:
+        return {"record": db.update_publication_for_user(record_id, user, payload.model_dump(exclude_unset=True))}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/publications/{record_id}")
+def delete_publication(
+    record_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    db: PublishingStore = Depends(store),
+):
+    try:
+        db.delete_publication_for_user(record_id, user)
+        return {"deleted": True}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc

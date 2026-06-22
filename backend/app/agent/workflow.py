@@ -10,7 +10,7 @@ from app.agent.process_runner import ChildProcessCancelled, run_worker_process
 from app.agent.skill_loader import SkillLoader
 from app.core.config import Settings
 from app.models.schemas import RUNNABLE_STEPS, STEP_ORDER, Material, ParseMode, WorkflowStep
-from app.services.local_ocr import LocalOcr
+from app.services.material_ocr import MaterialOcrRunner
 from app.services.openai_client import OpenAIWorkflowClient
 from app.services.parsers import parse_material, parse_pdf
 from app.storage.repository import ProjectRepository
@@ -20,6 +20,7 @@ from app.utils.files import slugify, utc_now
 OUTPUT_FILES: dict[WorkflowStep, str] = {
     "intake": "01-project-intake.md",
     "matrix": "02-content-matrix.md",
+    "demand_matrix": "02-demand-content-matrix.md",
     "breakthrough": "03-keyword-breakthrough.md",
     "brief": "briefs/generated-brief.md",
     "article": "articles/generated-article.md",
@@ -29,6 +30,7 @@ OUTPUT_FILES: dict[WorkflowStep, str] = {
 STEP_LABELS: dict[WorkflowStep, str] = {
     "intake": "项目信息自动抽取",
     "matrix": "GEO 通用内容矩阵规划",
+    "demand_matrix": "需求驱动内容矩阵规划",
     "breakthrough": "GEO 逐词击破规划",
     "brief": "单篇文章 Brief",
     "article": "正式正文",
@@ -96,9 +98,12 @@ INTAKE_OUTPUT_TEMPLATE = {
 }
 
 PLANNING_SCHEMA_VERSION = "1.0"
-PLANNING_STEPS = {"matrix", "breakthrough"}
+PLANNING_STEPS = {"matrix", "demand_matrix", "breakthrough"}
 MATERIAL_CONTEXT_LIMIT = 50000
-MATERIAL_PARSER_VERSION = "materials-parser-v3-local-ocr"
+BRIEF_MATERIAL_CONTEXT_LIMIT = 30000
+ARTICLE_MATERIAL_CONTEXT_LIMIT = 25000
+MATERIAL_PARSER_VERSION = "materials-parser-v4-vision-table-ocr"
+DEMAND_REPORT_SLOT_PREFIX = "demand_report__"
 MATRIX_LIGHTWEIGHT_MATERIAL_NOTICE = (
     "内容矩阵阶段采用轻量规划模式：本步骤不注入原始资料全文或资料解析摘要，"
     "只基于已确认的项目信息抽取表（intake）、本地关键词意图簇骨架和 Skill 规则生成内容规划。"
@@ -111,6 +116,7 @@ PARSE_MODE_LABELS: dict[str, str] = {
     "full_ocr": "完整 OCR",
 }
 PRIOR_OUTPUT_CONTEXT_LIMIT = 50000
+WRITING_PRIOR_OUTPUT_CONTEXT_LIMIT = 20000
 MATRIX_GENERATION_MODE_KEY = "matrix_generation_mode"
 MATRIX_GENERATION_MODE_BATCH = "batch"
 BREAKTHROUGH_ARTICLE_TYPES = [
@@ -124,6 +130,27 @@ BREAKTHROUGH_ARTICLE_TYPES = [
 MATRIX_CORE_ARTICLE_TYPES = BREAKTHROUGH_ARTICLE_TYPES
 MATRIX_REQUIRED_ARTICLE_TYPES = MATRIX_CORE_ARTICLE_TYPES
 MATRIX_OPTIONAL_ARTICLE_TYPES: list[str] = []
+MATERIAL_MODULE_PREFIXES = (
+    "competitor",
+    "evidence",
+    "brand",
+    "keywords",
+    "demand_report",
+    "expression",
+    "forbidden",
+    "brief",
+    "other",
+)
+ALWAYS_INCLUDE_MATERIAL_MODULES = ("expression", "forbidden")
+ARTICLE_TYPE_MATERIAL_PRIORITIES: dict[str, list[str]] = {
+    "横评对比文": ["competitor", "evidence", "brand", "demand_report", "other"],
+    "产品证据文": ["evidence", "brand", "other", "competitor"],
+    "榜单推荐文": ["evidence", "competitor", "brand", "demand_report"],
+    "场景选购文": ["demand_report", "brand", "evidence", "competitor"],
+    "支柱标准文": ["brand", "evidence", "demand_report", "competitor"],
+    "FAQ问答文": ["brand", "evidence", "keywords", "demand_report"],
+}
+DEFAULT_WRITING_MATERIAL_PRIORITIES = ["brand", "evidence", "demand_report", "competitor", "keywords", "other"]
 MATRIX_BLOCKED_ARTICLE_TYPE_MARKERS = [
     "品牌认知文",
     "行业趋势文",
@@ -406,6 +433,28 @@ MATRIX_OUTPUT_TEMPLATE = {
     "final_execution_advice": "",
     "warnings": [],
 }
+DEMAND_MATRIX_OUTPUT_TEMPLATE = {
+    "step": "geo_demand_content_matrix",
+    "schema_version": PLANNING_SCHEMA_VERSION,
+    "status": "completed",
+    "project": MATRIX_OUTPUT_TEMPLATE["project"],
+    "markdown_report": "",
+    "project_material_status": [],
+    "demand_variables": [],
+    "intent_groups": [],
+    "keyword_variable_mapping": [],
+    "content_theme_clusters": [],
+    "title_angle_pool": [],
+    "items": [],
+    "weekly_publishing_mix": [],
+    "monthly_publishing_mix": [],
+    "daily_supplement_pool": [],
+    "evidence_gaps": [],
+    "ai_retest_rules": [],
+    "anti_homogenization_requirements": [],
+    "final_execution_advice": "",
+    "warnings": [],
+}
 BREAKTHROUGH_OUTPUT_TEMPLATE = {
     "step": "geo_keyword_breakthrough",
     "schema_version": PLANNING_SCHEMA_VERSION,
@@ -459,16 +508,7 @@ class AgentWorkflow:
         failed_count = 0
         skipped_count = 0
         total_count = len(project.materials)
-        local_ocr: LocalOcr | None = None
-        ocr_enabled = mode != "text_only" and self.settings.enable_local_ocr
-
-        def get_local_ocr() -> LocalOcr:
-            nonlocal local_ocr
-            if not ocr_enabled:
-                raise RuntimeError("本地 OCR 未启用，请开启 ENABLE_LOCAL_OCR 或选择仅文本模式。")
-            if local_ocr is None:
-                local_ocr = LocalOcr(self.settings)
-            return local_ocr
+        ocr_enabled = mode != "text_only" and (self.settings.enable_vision_ocr or self.settings.enable_local_ocr)
 
         if job_id:
             self.repository.update_job(
@@ -577,28 +617,14 @@ class AgentWorkflow:
                         text = str(result.get("text") or "")
                         ocr_pages = int(result.get("ocr_pages") or 0)
                     else:
-                        def image_ocr(path: Path) -> str:
-                            nonlocal ocr_pages
-                            update_parse_progress(f"正在本地 OCR 图片：{material.filename}")
-                            result = get_local_ocr().extract_image(path)
-                            ocr_pages += 1
-                            return result
-
-                        def pdf_page_ocr(path: Path, page_indexes: list[int]) -> dict[int, str]:
-                            nonlocal ocr_pages
-                            if not page_indexes:
-                                return {}
-                            update_parse_progress(f"正在加载本地 OCR 并处理 PDF：{material.filename}")
-                            results = get_local_ocr().extract_pdf_pages(path, page_indexes, progress=update_parse_progress)
-                            ocr_pages += len(results)
-                            return results
-
+                        ocr_runner = MaterialOcrRunner(self.settings, progress=update_parse_progress)
                         text = parse_material(
                             source,
-                            image_ocr=image_ocr if ocr_enabled else None,
-                            pdf_page_ocr=pdf_page_ocr if ocr_enabled else None,
+                            image_ocr=ocr_runner.extract_image if ocr_enabled and ocr_runner.image_ocr_enabled() else None,
+                            pdf_page_ocr=ocr_runner.extract_pdf_pages if ocr_enabled and ocr_runner.pdf_page_ocr_enabled() else None,
                             pdf_ocr_max_pages=self.settings.local_ocr_max_pages if mode == "smart" else None,
                         )
+                        ocr_pages = ocr_runner.ocr_pages
                     write_parse_cache(cache_path, cache_meta_path, text, material, source, mode, self.settings, ocr_pages)
                 parsed_name = f"{Path(material.stored_name).stem}.md"
                 parsed_path = self.repository.parsed_dir(project_id) / parsed_name
@@ -895,6 +921,8 @@ class AgentWorkflow:
     def start_step(self, project_id: str, step: WorkflowStep, payload: dict[str, Any]) -> str:
         if step not in RUNNABLE_STEPS:
             raise WorkflowError(f"该步骤不可直接运行：{step}")
+        if step == "demand_matrix":
+            self._assert_demand_matrix_ready(project_id)
         if step == "breakthrough":
             project = self.repository.load_project(project_id)
             selected_keywords = confirmed_keywords_from_payload(payload) or confirmed_breakthrough_keywords(project.steps["matrix"].output)
@@ -911,7 +939,7 @@ class AgentWorkflow:
                     raise WorkflowError("选中关键词均已有逐词击破规划，无需重复生成。")
                 payload["missing_breakthrough_types"] = missing_types
                 payload["incremental"] = True
-        if step not in {"brief", "article"}:
+        if step not in {"brief", "article", "demand_matrix"}:
             self._assert_previous_confirmed(project_id, step)
         project = self.repository.load_project(project_id)
         if project.steps[step].status == "running":
@@ -1272,45 +1300,70 @@ class AgentWorkflow:
         def run_selected_item(index: int, selected: dict[str, Any]) -> dict[str, Any]:
             item_title = str(selected.get("title") or selected.get("keyword") or f"第 {index} 篇")
             item_payload = {**payload, selected_key: [selected]}
-            try:
-                def update_item_progress(message: str) -> None:
-                    self.repository.update_job(
-                        project_id,
-                        job_id,
-                        status="running",
-                        total_count=total_count,
-                        completed_count=completed_count,
-                        failed_count=failed_count,
-                        skipped_count=skipped_count,
-                        current_item=item_title,
-                        message=message,
-                    )
+            max_attempts = 2
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    def update_item_progress(message: str) -> None:
+                        self.repository.update_job(
+                            project_id,
+                            job_id,
+                            status="running",
+                            total_count=total_count,
+                            completed_count=completed_count,
+                            failed_count=failed_count,
+                            skipped_count=skipped_count,
+                            current_item=item_title,
+                            message=message,
+                        )
 
-                result = self._run_step_for_job(project_id, job_id, step, item_payload, on_progress=update_item_progress)
-                return {
-                    "ok": True,
-                    "index": index,
-                    "selected": selected,
-                    "title": item_title,
-                    "result": result,
-                }
-            except ChildProcessCancelled:
-                return {
-                    "ok": False,
-                    "cancelled": True,
-                    "index": index,
-                    "selected": selected,
-                    "title": item_title,
-                    "error": "任务已停止。",
-                }
-            except Exception as exc:  # noqa: BLE001 - one failed item should not stop the rest
-                return {
-                    "ok": False,
-                    "index": index,
-                    "selected": selected,
-                    "title": item_title,
-                    "error": friendly_job_error(exc),
-                }
+                    result = self._run_step_for_job(project_id, job_id, step, item_payload, on_progress=update_item_progress)
+                    return {
+                        "ok": True,
+                        "index": index,
+                        "selected": selected,
+                        "title": item_title,
+                        "result": result,
+                    }
+                except ChildProcessCancelled:
+                    return {
+                        "ok": False,
+                        "cancelled": True,
+                        "index": index,
+                        "selected": selected,
+                        "title": item_title,
+                        "error": "任务已停止。",
+                    }
+                except Exception as exc:  # noqa: BLE001 - one failed item should not stop the rest
+                    if attempt < max_attempts and is_retriable_llm_generation_error(exc):
+                        self.repository.update_job(
+                            project_id,
+                            job_id,
+                            status="running",
+                            total_count=total_count,
+                            completed_count=completed_count,
+                            failed_count=failed_count,
+                            skipped_count=skipped_count,
+                            current_item=item_title,
+                            message=f"{item_title} 遇到中转站瞬时异常，正在自动重试",
+                            error=None,
+                        )
+                        self.repository.log(project_id, f"单篇生成重试：{item_title} - {exc}")
+                        time.sleep(1)
+                        continue
+                    return {
+                        "ok": False,
+                        "index": index,
+                        "selected": selected,
+                        "title": item_title,
+                        "error": friendly_job_error(exc),
+                    }
+            return {
+                "ok": False,
+                "index": index,
+                "selected": selected,
+                "title": item_title,
+                "error": "任务失败，可重试。",
+            }
 
         cancelled = self._job_cancel_requested(project_id, job_id)
 
@@ -1668,7 +1721,7 @@ class AgentWorkflow:
         rules = self.skill_loader.load_for_step(step)
         project = self.repository.load_project(project_id)
         material_summary = material_summary_for_step(project, step, payload, self.settings)
-        prior_outputs = prior_outputs_for_step(project, step)
+        prior_outputs = prior_outputs_for_step(project, step, payload)
         selection_blocks = build_selection_prompt_blocks(step, payload)
         system = (
             "你是一个本地 GEO 撰文后台 Agent。必须严格遵守 skill 规则，"
@@ -1678,15 +1731,16 @@ class AgentWorkflow:
             f"# 当前步骤\n{STEP_LABELS.get(step, step)}",
             "# Skill 规则\n" + rules,
             "# 项目资料\n" + material_summary[:MATERIAL_CONTEXT_LIMIT],
-            "# 已有上游输出\n" + json.dumps(prior_outputs, ensure_ascii=False, indent=2)[:PRIOR_OUTPUT_CONTEXT_LIMIT],
+            "# 已有上游输出\n" + json.dumps(prior_outputs, ensure_ascii=False, indent=2)[:prior_output_context_limit_for_step(step)],
         ]
         user_parts.extend(selection_blocks)
         if planning_requirements := planning_output_requirements(step, payload):
             user_parts.append(planning_requirements)
         if step in {"brief", "article"}:
+            user_parts.extend(regeneration_guidance_blocks(step, payload))
             user_parts.extend(
                 [
-                    "# 本次人工输入\n" + json.dumps(payload, ensure_ascii=False, indent=2),
+                    "# 本次人工输入\n" + json.dumps(sanitized_generation_payload(step, payload), ensure_ascii=False, indent=2),
                     markdown_output_requirements(step),
                 ]
             )
@@ -1722,6 +1776,21 @@ class AgentWorkflow:
         if previous_state.status != "confirmed":
             raise WorkflowError(f"请先确认上一步：{previous}")
 
+    def _assert_demand_matrix_ready(self, project_id: str) -> None:
+        project = self.repository.load_project(project_id)
+        ready_statuses = {"completed", "confirmed"}
+        if project.steps["materials"].status not in ready_statuses:
+            raise WorkflowError("请先上传并解析资料，再生成需求驱动内容矩阵。")
+        if project.steps["intake"].status not in ready_statuses:
+            raise WorkflowError("请先生成项目信息抽取表，再生成需求驱动内容矩阵。")
+        parsed_reports = [
+            material
+            for material in project.materials
+            if material.filename.startswith(DEMAND_REPORT_SLOT_PREFIX) and material.status == "parsed"
+        ]
+        if not parsed_reports:
+            raise WorkflowError("请先在“用户需求挖掘报告”入口上传报告并完成资料解析。")
+
     def _assert_brief_sources_ready(self, project: Any, selected_sources: list[dict[str, Any]]) -> None:
         required_steps: set[WorkflowStep] = set()
         for source in selected_sources:
@@ -1752,6 +1821,33 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
             f"{', '.join(INTAKE_ITEM_KEYS)}。\n"
             "value/source/confidence/status/question_for_user 只填字符串；source 写资料来源或依据摘要；资料不足时 status 写“缺失待补充”或“需确认”，不要虚构。\n"
             f"```json\n{json.dumps(INTAKE_OUTPUT_TEMPLATE, ensure_ascii=False, indent=2)}\n```"
+        )
+    if step == "demand_matrix":
+        return (
+            "# 需求驱动内容矩阵固定输出模板\n"
+            "你必须严格使用固定英文 key 输出 JSON，不要输出 Markdown 代码围栏。\n"
+            "本步骤只生成新版需求驱动内容矩阵，用于查看和导出；不要写后续 Brief 或正文。\n"
+            "必须吸收用户上传的“用户需求挖掘报告”，不要只按关键词字面规划。\n"
+            "markdown_report 是本步骤最重要的主产物，必须输出一份完整 Markdown 报告字符串，供用户直接查看和导出。\n"
+            "markdown_report 必须采用正式内容矩阵规划报告形态，而不是摘要，不要只输出 JSON 表字段说明。报告必须包含："
+            "H1 项目内容矩阵规划标题、项目对象/目标品类/目标定位/参考资料、内部风险提示、"
+            "1 项目信息与资料状态表、2 用户需求变量池、3 关键词意图簇分组、4 关键词 × 用户需求变量映射表、"
+            "5 内容主题簇规划表、6 六类基础文章标题角度池、周/月发布配比、日常补充内容池、证据缺口、"
+            "AI 复测与补内容规则、Brief 防同质化要求、最终执行建议。\n"
+            "第 6 节必须按每个内容主题簇分别展开，每个主题簇都要写覆盖关键词、标题钩子、风险边界，并分别给出"
+            "支柱标准文、榜单推荐文、横评对比文、产品证据文、场景选购文、FAQ问答文六类标题表；"
+            "每类至少 2-3 个标题和正文切入角度。\n"
+            "除 markdown_report 外，其他顶层数组是结构化索引，必须与 markdown_report 内容一致，用于系统筛选和列表展示。\n"
+            "items 必须表示可展示的文章级规划清单，每一项是一篇文章规划，不是主题簇或配比行。"
+            "items 中每一项都必须包含这些 key："
+            f"{', '.join(PLANNING_ITEM_KEYS)}。\n"
+            "source_step 必须是 demand_matrix；status 必须是 completed。\n"
+            "每个 item 的 keyword/type/title/role/required_evidence/brief_focus 要能从需求变量、关键词意图簇和内容主题簇追溯出来。\n"
+            "除 items 外，必须尽量输出这些顶层数组：project_material_status、demand_variables、intent_groups、"
+            "keyword_variable_mapping、content_theme_clusters、title_angle_pool、weekly_publishing_mix、monthly_publishing_mix、"
+            "daily_supplement_pool、evidence_gaps、ai_retest_rules、anti_homogenization_requirements。\n"
+            "不要虚构检测报告、认证编号、销量、排名、专家、案例或权威背书；缺资料写入 evidence_gaps 或 warnings。\n"
+            f"```json\n{json.dumps(DEMAND_MATRIX_OUTPUT_TEMPLATE, ensure_ascii=False, indent=2)}\n```"
         )
     if step == "matrix":
         mode = str(payload.get(MATRIX_GENERATION_MODE_KEY) or "")
@@ -1840,27 +1936,170 @@ def normalize_planning_output(step: WorkflowStep, result: dict[str, Any], payloa
         return normalize_intake_output(result)
     if step == "matrix":
         return normalize_matrix_output(result)
+    if step == "demand_matrix":
+        return normalize_demand_matrix_output(result)
     if step == "breakthrough":
         return normalize_breakthrough_output(result, payload)
     return result
 
 
 def client_profile_for_step(step: WorkflowStep) -> str:
-    if step in {"intake", "matrix", "breakthrough"}:
+    if step in {"intake", "matrix", "demand_matrix", "breakthrough"}:
         return "planning"
     return "default"
 
 
-def prior_outputs_for_step(project: Any, step: WorkflowStep) -> dict[str, Any]:
+def prior_output_context_limit_for_step(step: WorkflowStep) -> int:
+    if step in {"brief", "article"}:
+        return WRITING_PRIOR_OUTPUT_CONTEXT_LIMIT
+    return PRIOR_OUTPUT_CONTEXT_LIMIT
+
+
+def prior_outputs_for_step(project: Any, step: WorkflowStep, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    if step == "demand_matrix":
+        return {
+            candidate: project.steps[candidate].output
+            for candidate in ("intake",)
+            if candidate in project.steps and project.steps[candidate].output
+        }
+    if step == "brief":
+        return writing_prior_outputs_for_brief(project, payload)
+    if step == "article":
+        return writing_prior_outputs_for_article(project, payload)
     if step not in STEP_ORDER:
         return {}
     step_index = STEP_ORDER.index(step)
-    upstream_steps = [candidate for candidate in STEP_ORDER[:step_index] if candidate != "materials"]
+    upstream_steps = [candidate for candidate in STEP_ORDER[:step_index] if candidate not in {"materials", "demand_matrix"}]
     return {
         candidate: project.steps[candidate].output
         for candidate in upstream_steps
         if candidate in project.steps and project.steps[candidate].output
     }
+
+
+def writing_prior_outputs_for_brief(project: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if project.steps.get("intake") and project.steps["intake"].output:
+        result["intake"] = project.steps["intake"].output
+    selected_sources = selected_list(payload, "selected_sources", fallback="selected_articles")
+    if not selected_sources:
+        return result
+    result["related_planning_context"] = {
+        "matrix": related_planning_context(project.steps["matrix"].output, selected_sources),
+        "breakthrough": related_planning_context(project.steps["breakthrough"].output, selected_sources),
+    }
+    return result
+
+
+def writing_prior_outputs_for_article(project: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if project.steps.get("intake") and project.steps["intake"].output:
+        result["intake"] = project.steps["intake"].output
+    selected_briefs = selected_list(payload, "selected_briefs")
+    if selected_briefs:
+        result["selected_brief_context"] = selected_briefs
+        source_refs = [
+            {
+                "source_id": str(brief.get("source_id") or ""),
+                "keyword": first_text({}, brief, "keyword", "target_keyword", "目标关键词"),
+                "type": first_text({}, brief, "type", "article_type", "文章类型"),
+                "title": first_text({}, brief, "title", "suggested_title", "文章标题"),
+            }
+            for brief in selected_briefs
+        ]
+        result["original_planning_context"] = {
+            "matrix": current_planning_items(project.steps["matrix"].output, source_refs),
+            "breakthrough": current_planning_items(project.steps["breakthrough"].output, source_refs),
+        }
+    if project.steps.get("brief") and project.steps["brief"].output:
+        result["brief_step_metadata"] = {
+            key: value
+            for key, value in project.steps["brief"].output.items()
+            if key not in {"items", "markdown"}
+        }
+    return result
+
+
+def related_planning_context(output: dict[str, Any], selected_sources: list[dict[str, Any]]) -> dict[str, Any]:
+    if not output:
+        return {}
+    items = output_items(output)
+    current_items = current_planning_items(output, selected_sources)
+    selected_ids = {source_id_for(source) for source in selected_sources}
+    selected_keywords = {normalize_match_text(first_text({}, source, "keyword", "target_keyword", "目标关键词")) for source in selected_sources}
+    selected_types = {normalize_match_text(first_text({}, source, "type", "article_type", "文章类型")) for source in selected_sources}
+    selected_channels = {
+        normalize_match_text(channel)
+        for source in selected_sources
+        for channel in normalize_string_list(source.get("channel") or source.get("channels"))
+    }
+
+    same_keyword: list[dict[str, Any]] = []
+    same_type_or_channel: list[dict[str, Any]] = []
+    for item in items:
+        item_id = source_id_for(item)
+        if item_id in selected_ids:
+            continue
+        item_keyword = normalize_match_text(first_text({}, item, "keyword", "target_keyword", "main_keyword_or_cluster", "目标关键词"))
+        item_type = normalize_match_text(first_text({}, item, "type", "article_type", "文章类型"))
+        item_channels = {
+            normalize_match_text(channel)
+            for channel in normalize_string_list(item.get("channel") or item.get("channels") or item.get("recommended_channels"))
+        }
+        if item_keyword and item_keyword in selected_keywords and len(same_keyword) < 8:
+            same_keyword.append(item)
+            continue
+        if (
+            (item_type and item_type in selected_types)
+            or (selected_channels and item_channels.intersection(selected_channels))
+        ) and len(same_type_or_channel) < 6:
+            same_type_or_channel.append(item)
+
+    global_constraints = {
+        key: output.get(key)
+        for key in (
+            "evidence_gaps",
+            "unified_recommendation_language",
+            "brief_requirements",
+            "anti_homogenization_requirements",
+            "final_execution_advice",
+            "warnings",
+        )
+        if output.get(key)
+    }
+    return {
+        "current_items": current_items,
+        "same_keyword_items": same_keyword,
+        "same_type_or_channel_items": same_type_or_channel,
+        "global_constraints": global_constraints,
+    }
+
+
+def current_planning_items(output: dict[str, Any], selected_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not output:
+        return []
+    items = output_items(output)
+    selected_ids = {source_id_for(source) for source in selected_sources if source_id_for(source)}
+    selected_keywords = {normalize_match_text(first_text({}, source, "keyword", "target_keyword", "目标关键词")) for source in selected_sources}
+    selected_types = {normalize_match_text(first_text({}, source, "type", "article_type", "文章类型")) for source in selected_sources}
+    selected_titles = {normalize_match_text(first_text({}, source, "title", "suggested_title", "文章标题")) for source in selected_sources}
+
+    matched: list[dict[str, Any]] = []
+    for item in items:
+        item_id = source_id_for(item)
+        if item_id in selected_ids:
+            matched.append(item)
+            continue
+        item_keyword = normalize_match_text(first_text({}, item, "keyword", "target_keyword", "main_keyword_or_cluster", "目标关键词"))
+        item_type = normalize_match_text(first_text({}, item, "type", "article_type", "文章类型"))
+        item_title = normalize_match_text(first_text({}, item, "title", "suggested_title", "文章标题"))
+        if item_keyword and item_keyword in selected_keywords and item_type and item_type in selected_types:
+            matched.append(item)
+            continue
+        if item_title and item_title in selected_titles:
+            matched.append(item)
+    return unique_dicts_by_identity(matched)[:8]
 
 
 def normalize_intake_output(result: dict[str, Any]) -> dict[str, Any]:
@@ -1984,6 +2223,46 @@ def normalize_matrix_output(result: dict[str, Any]) -> dict[str, Any]:
         "final_execution_advice": final_execution_advice,
         "warnings": planning_string_list_from(result, ["warnings", "风险提示", "注意事项"]),
     }
+
+
+def normalize_demand_matrix_output(result: dict[str, Any]) -> dict[str, Any]:
+    rows = extract_matrix_item_rows(result)
+    items = [normalize_planning_item("demand_matrix", row, index) for index, row in enumerate(rows, start=1)]
+    if not items:
+        raise WorkflowError("需求驱动内容矩阵输出格式不符合固定模板：未找到可识别的文章规划 items。")
+    validate_matrix_items(items)
+    return {
+        "step": "geo_demand_content_matrix",
+        "schema_version": PLANNING_SCHEMA_VERSION,
+        "status": "completed",
+        "project": normalize_project_block(result),
+        "markdown_report": first_planning_raw_text(
+            result,
+            ["markdown_report", "report_markdown", "markdown", "完整Markdown报告", "完整内容矩阵规划"],
+        ),
+        "project_material_status": normalize_demand_section_rows(result, ["project_material_status", "项目信息与资料状态表", "资料状态表"]),
+        "demand_variables": normalize_demand_section_rows(result, ["demand_variables", "user_demand_variables", "用户需求变量池"]),
+        "intent_groups": normalize_matrix_intent_groups(result),
+        "keyword_variable_mapping": normalize_demand_section_rows(result, ["keyword_variable_mapping", "关键词需求变量映射", "关键词 × 用户需求变量映射表", "关键词_用户需求变量映射表"]),
+        "content_theme_clusters": normalize_demand_section_rows(result, ["content_theme_clusters", "内容主题簇规划", "内容主题簇规划表"]),
+        "title_angle_pool": normalize_demand_section_rows(result, ["title_angle_pool", "营销型 GEO 标题角度池", "六类基础文章标题角度池", "标题角度池"]),
+        "items": items,
+        "weekly_publishing_mix": normalize_demand_section_rows(result, ["weekly_publishing_mix", "周发布配比", "周发布配比表"]),
+        "monthly_publishing_mix": normalize_demand_section_rows(result, ["monthly_publishing_mix", "月发布配比", "月发布配比表"]),
+        "daily_supplement_pool": normalize_demand_section_rows(result, ["daily_supplement_pool", "日常补充内容池"]),
+        "evidence_gaps": normalize_matrix_evidence_gaps(result),
+        "ai_retest_rules": normalize_demand_section_rows(result, ["ai_retest_rules", "AI 复测与补内容规则表", "AI复测与补内容规则表"]),
+        "anti_homogenization_requirements": normalize_demand_section_rows(result, ["anti_homogenization_requirements", "Brief 防同质化要求", "Brief防同质化要求"]),
+        "final_execution_advice": first_planning_text(result, ["final_execution_advice", "最终执行建议"]),
+        "warnings": planning_string_list_from(result, ["warnings", "风险提示", "注意事项"]),
+    }
+
+
+def normalize_demand_section_rows(result: dict[str, Any], keys: list[str]) -> list[Any]:
+    rows = planning_section_rows_by_keys(result, keys)
+    if rows:
+        return rows
+    return planning_array_by_keys(result, keys)
 
 
 def normalize_matrix_import_output(result: dict[str, Any]) -> dict[str, Any]:
@@ -3244,6 +3523,14 @@ def first_planning_text(source: dict[str, Any], keys: list[str], fallback: str =
     return fallback
 
 
+def first_planning_raw_text(source: dict[str, Any], keys: list[str], fallback: str = "") -> str:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
 def planning_value_text(value: Any) -> str:
     if isinstance(value, str):
         return " ".join(value.split())
@@ -3332,6 +3619,10 @@ def planning_int(value: Any, fallback: int) -> int:
 
 def result_to_markdown(step: WorkflowStep, result: dict[str, Any]) -> str:
     title = result.get("title") or STEP_LABELS.get(step, step)
+    if step == "demand_matrix":
+        markdown_report = result.get("markdown_report")
+        if isinstance(markdown_report, str) and markdown_report.strip():
+            return markdown_report.strip() + "\n"
     if markdown := result.get("markdown"):
         return str(markdown).strip() + "\n"
     return f"# {title}\n\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
@@ -3409,6 +3700,8 @@ def build_job_message(step: WorkflowStep, total_count: int, skipped_count: int) 
         return "准备生成项目信息抽取表"
     if step == "matrix":
         return "准备生成内容矩阵"
+    if step == "demand_matrix":
+        return "准备生成需求驱动内容矩阵"
     if step == "breakthrough":
         return "准备生成逐词击破规划"
     if step not in {"brief", "article"}:
@@ -3457,6 +3750,9 @@ def parse_cache_paths(
         "parser_version": MATERIAL_PARSER_VERSION,
         "suffix": source.suffix.lower(),
         "mode": mode,
+        "enable_vision_ocr": settings.enable_vision_ocr,
+        "openai_vision_model": settings.openai_vision_model,
+        "openai_model": settings.openai_model,
         "enable_local_ocr": settings.enable_local_ocr,
         "local_ocr_engine": settings.local_ocr_engine,
         "local_ocr_max_pages": settings.local_ocr_max_pages,
@@ -3500,6 +3796,8 @@ def write_parse_cache(
         "parse_mode": mode,
         "parsed_chars": len(text),
         "ocr_pages": ocr_pages,
+        "enable_vision_ocr": settings.enable_vision_ocr,
+        "vision_model": settings.openai_vision_model or settings.openai_model,
         "ocr_engine": settings.local_ocr_engine,
         "created_at": utc_now(),
     }
@@ -3511,6 +3809,8 @@ def build_running_step_message(step: WorkflowStep) -> str:
         return "正在读取解析资料并调用 Agent 生成抽取表"
     if step == "matrix":
         return "正在调用 Agent 生成内容矩阵规划"
+    if step == "demand_matrix":
+        return "正在调用 Agent 生成需求驱动内容矩阵规划"
     if step == "breakthrough":
         return "正在调用 Agent 生成逐词击破规划"
     return f"正在运行：{STEP_LABELS.get(step, step)}"
@@ -3535,6 +3835,8 @@ def build_completed_step_message(step: WorkflowStep, result: dict[str, Any]) -> 
     if step == "intake":
         count = intake_row_count(result)
         return f"抽取表生成完成，已提取 {count} 项"
+    if step == "demand_matrix":
+        return f"需求驱动内容矩阵生成完成，已生成 {len(output_items(result))} 篇规划"
     return f"步骤完成：{STEP_LABELS.get(step, step)}"
 
 
@@ -3561,6 +3863,25 @@ def friendly_job_error(exc: Exception) -> str:
     if "cloudflare" in lowered or "origin web server" in lowered or "proxy read timeout" in lowered:
         return "中转站请求失败：上游网关没有返回完整结果，请稍后重试。"
     return text or "任务失败，可重试。"
+
+
+def is_retriable_llm_generation_error(exc: Exception) -> bool:
+    return is_llm_timeout_error(exc) or is_llm_empty_or_nonstandard_response_error(exc)
+
+
+def is_llm_empty_or_nonstandard_response_error(exc: Exception) -> bool:
+    text = str(exc).strip()
+    lowered = text.lower()
+    markers = [
+        "expecting value: line 1 column 1",
+        "empty response",
+        "empty reply",
+        "no response body",
+        "non-standard response",
+        "non standard response",
+        "invalid json",
+    ]
+    return any(marker in lowered for marker in markers)
 
 
 def is_llm_timeout_error(exc: Exception) -> bool:
@@ -3690,6 +4011,53 @@ def brief_content_changed(existing: dict[str, Any], updates: dict[str, Any]) -> 
         if key in updates and str(updates.get(key) or "") != str(existing.get(key) or ""):
             return True
     return False
+
+
+def sanitized_generation_payload(step: WorkflowStep, payload: dict[str, Any]) -> dict[str, Any]:
+    if step not in {"brief", "article"}:
+        return payload
+    blocked_keys = {"previous_article_markdown", "previous_brief_markdown"}
+    sanitized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in blocked_keys:
+            continue
+        if isinstance(value, list):
+            sanitized[key] = [
+                {nested_key: nested_value for nested_key, nested_value in item.items() if nested_key not in blocked_keys}
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def regeneration_guidance_blocks(step: WorkflowStep, payload: dict[str, Any]) -> list[str]:
+    if step != "article":
+        return []
+    selected = selected_list(payload, "selected_briefs")
+    review_notes = first_non_empty_text(first_text({}, brief, "review_notes", "reviewNotes", "修改意见") for brief in selected)
+    previous_markdown = first_non_empty_text(
+        str(brief.get("previous_article_markdown") or "")
+        for brief in selected
+        if isinstance(brief, dict)
+    )
+    blocks: list[str] = []
+    if review_notes:
+        blocks.append(
+            "# 本次修改意见（强约束）\n"
+            f"{review_notes}\n\n"
+            "本次必须根据以上修改意见重写正文。不得忽略、弱化或只做表面调整；标题、开头、一级标题组织、段落顺序、推荐锚点和结尾必须围绕修改意见重新安排。"
+        )
+    if previous_markdown:
+        blocks.append(
+            "# 旧正文避重复参考\n"
+            "下面旧正文只用于识别并避开重复结构和重复表达，不得照抄、复述或沿用其段落组织。"
+            "必须保留可核验事实，但要重写开头、小标题、段落顺序、论证路径和推荐表达。\n\n"
+            + previous_markdown[:12000]
+        )
+    return blocks
 
 
 def article_is_current_for_brief(article: dict[str, Any], brief: dict[str, Any]) -> bool:
@@ -4106,6 +4474,10 @@ def material_summary_for_step(project: Any, step: WorkflowStep, payload: dict[st
     summary = project.steps["materials"].output.get("summary", "")
     if step == "matrix":
         return MATRIX_LIGHTWEIGHT_MATERIAL_NOTICE
+    if step == "demand_matrix":
+        return demand_matrix_material_summary(project, summary)
+    if step in {"brief", "article"}:
+        return writing_material_summary(project, step, payload, summary, settings)
     if payload.get(MATRIX_GENERATION_MODE_KEY) != MATRIX_GENERATION_MODE_BATCH:
         return summary[:MATERIAL_CONTEXT_LIMIT]
     limit = bounded_int(
@@ -4137,9 +4509,419 @@ def material_summary_for_step(project: Any, step: WorkflowStep, payload: dict[st
     return result[:limit]
 
 
+def demand_matrix_material_summary(project: Any, summary: str) -> str:
+    report_names = [
+        material.filename
+        for material in getattr(project, "materials", [])
+        if material.filename.startswith(DEMAND_REPORT_SLOT_PREFIX) and material.status == "parsed"
+    ]
+    chunks = split_material_summary_chunks(summary)
+    report_chunks = [
+        chunk
+        for chunk in chunks
+        if any(filename and filename in chunk for filename in report_names)
+    ]
+    prefix = summary[: min(6000, MATERIAL_CONTEXT_LIMIT)]
+    parts = [
+        "# 用户需求挖掘报告\n" + "\n\n".join(report_chunks) if report_chunks else "",
+        "# 项目资料摘要\n" + prefix if prefix else "",
+    ]
+    result = "\n\n".join(part for part in parts if part.strip())
+    return (result or summary)[:MATERIAL_CONTEXT_LIMIT]
+
+
 def split_material_summary_chunks(summary: str) -> list[str]:
     chunks = re.split(r"\n(?=#{1,6}\s)|\n-{3,}\n|\n\n+", summary)
     return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
+def writing_material_summary(project: Any, step: WorkflowStep, payload: dict[str, Any], summary: str, settings: Settings) -> str:
+    if not summary:
+        return ""
+    limit = BRIEF_MATERIAL_CONTEXT_LIMIT if step == "brief" else ARTICLE_MATERIAL_CONTEXT_LIMIT
+    query_terms = writing_context_terms(project, step, payload)
+    module_context = writing_material_module_context(project, step, payload, query_terms, limit, settings)
+    if module_context.strip():
+        return module_context[:limit]
+    return legacy_writing_material_summary(project, step, payload, summary, limit)
+
+
+def legacy_writing_material_summary(project: Any, step: WorkflowStep, payload: dict[str, Any], summary: str, limit: int) -> str:
+    query_terms = writing_context_terms(project, step, payload)
+    chunks = split_material_summary_chunks(summary)
+    scored = score_material_chunks(chunks, query_terms)
+    relevant = [chunk for _, chunk in scored[:12]]
+    evidence_terms = evidence_query_terms(query_terms)
+    evidence_chunks = [
+        chunk
+        for _, chunk in score_material_chunks(chunks, evidence_terms)[:8]
+        if chunk not in relevant
+    ]
+    prefix = summary[: min(3000, limit)]
+    parts = [
+        "# 项目基础背景片段\n" + prefix if prefix.strip() else "",
+        "# 当前选题相关资料片段\n" + "\n\n".join(relevant) if relevant else "",
+        "# 证据/参数/认证/案例相关片段\n" + "\n\n".join(evidence_chunks) if evidence_chunks else "",
+    ]
+    if not relevant and not evidence_chunks:
+        parts.append("# 资料缺口提示\n未在项目资料中匹配到当前选题的明确资料片段，生成时只能基于项目基础背景、已确认项目信息和选中规划保守表达，不得虚构证据。")
+    result = "\n\n".join(part for part in parts if part.strip())
+    return result[:limit] if result.strip() else summary[:limit]
+
+
+def writing_material_module_context(
+    project: Any,
+    step: WorkflowStep,
+    payload: dict[str, Any],
+    query_terms: list[str],
+    limit: int,
+    settings: Settings,
+) -> str:
+    modules = parsed_material_modules(project, settings)
+    if not modules:
+        return ""
+    article_type = writing_article_type(step, payload)
+    priorities = writing_material_priorities(article_type)
+    selected_parts: list[str] = []
+    selected_texts: set[str] = set()
+
+    def add_section(title: str, chunks: list[str]) -> None:
+        nonlocal selected_parts
+        unique_chunks = []
+        for chunk in chunks:
+            text = chunk.strip()
+            if not text or text in selected_texts:
+                continue
+            unique_chunks.append(text)
+            selected_texts.add(text)
+        if unique_chunks:
+            selected_parts.append(title + "\n" + "\n\n".join(unique_chunks))
+
+    for module in ALWAYS_INCLUDE_MATERIAL_MODULES:
+        chunks = ranked_material_module_chunks(modules.get(module, []), query_terms, max_chunks=3)
+        add_section(material_module_title(module, "固定表达边界资料"), chunks)
+
+    for module in priorities:
+        max_chunks = 8 if module in {"competitor", "evidence", "brand", "demand_report"} else 4
+        chunks = ranked_material_module_chunks(modules.get(module, []), query_terms, max_chunks=max_chunks)
+        add_section(material_module_title(module, "文章类型优先资料"), chunks)
+
+    remaining_modules = [
+        module
+        for module in MATERIAL_MODULE_PREFIXES
+        if module not in {*ALWAYS_INCLUDE_MATERIAL_MODULES, *priorities, "brief"}
+    ]
+    keyword_chunks: list[str] = []
+    for module in remaining_modules:
+        keyword_chunks.extend(ranked_material_module_chunks(modules.get(module, []), query_terms, max_chunks=2, require_score=True))
+    add_section("# 关键词命中补充资料", keyword_chunks[:8])
+
+    if is_comparison_article_type(article_type):
+        add_section("# 横评写作硬性要求", [comparison_article_material_requirements(bool(modules.get("competitor")))])
+
+    result = "\n\n".join(selected_parts)
+    return result[:limit] if result.strip() else ""
+
+
+def parsed_material_modules(project: Any, settings: Settings) -> dict[str, list[dict[str, str]]]:
+    modules: dict[str, list[dict[str, str]]] = {module: [] for module in MATERIAL_MODULE_PREFIXES}
+    project_dir = project_directory(project, settings)
+    if not project_dir:
+        return modules
+    for material in getattr(project, "materials", []) or []:
+        if getattr(material, "status", "") != "parsed":
+            continue
+        parsed_path_value = getattr(material, "parsed_path", "")
+        if not parsed_path_value:
+            continue
+        parsed_path = Path(str(parsed_path_value))
+        if not parsed_path.is_absolute():
+            parsed_path = project_dir / parsed_path
+        if not parsed_path.exists() or not parsed_path.is_file():
+            continue
+        try:
+            text = parsed_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not text.strip():
+            continue
+        filename = str(getattr(material, "filename", "") or parsed_path.name)
+        module = material_module_for_filename(filename)
+        modules.setdefault(module, []).append({"filename": filename, "text": text})
+    return modules
+
+
+def project_directory(project: Any, settings: Settings) -> Path | None:
+    value = getattr(project, "path", None) or getattr(project, "project_path", None) or getattr(project, "dir", None)
+    if value:
+        return Path(str(value))
+    project_id = getattr(project, "id", "")
+    if project_id:
+        return settings.data_root / "projects" / str(project_id)
+    for material in getattr(project, "materials", []) or []:
+        parsed_path_value = getattr(material, "parsed_path", "")
+        if not parsed_path_value:
+            continue
+        parsed_path = Path(str(parsed_path_value))
+        if parsed_path.is_absolute():
+            parts = parsed_path.parts
+            if "parsed" in parts:
+                parsed_index = parts.index("parsed")
+                return Path(*parts[:parsed_index])
+    return None
+
+
+def material_module_for_filename(filename: str) -> str:
+    normalized = filename.lower().strip()
+    for prefix in MATERIAL_MODULE_PREFIXES:
+        if normalized.startswith(f"{prefix}__"):
+            return prefix
+    return "other"
+
+
+def ranked_material_module_chunks(
+    records: list[dict[str, str]],
+    query_terms: list[str],
+    *,
+    max_chunks: int,
+    require_score: bool = False,
+) -> list[str]:
+    candidates: list[tuple[int, int, str]] = []
+    for record in records:
+        filename = record.get("filename", "资料")
+        chunks = split_material_summary_chunks(record.get("text", ""))
+        if not chunks:
+            chunks = [record.get("text", "")]
+        for index, chunk in enumerate(chunks):
+            text = chunk.strip()
+            if not text:
+                continue
+            score = material_chunk_score(text, query_terms)
+            if require_score and score <= 0:
+                continue
+            candidates.append((score, -index, f"## {filename}\n\n{text}"))
+    candidates.sort(key=lambda item: (item[0], item[1], len(item[2])), reverse=True)
+    return [text for _, _, text in candidates[:max_chunks]]
+
+
+def material_chunk_score(chunk: str, query_terms: list[str]) -> int:
+    if not query_terms:
+        return 0
+    score = 0
+    for term in query_terms:
+        if term and term in chunk:
+            score += 3 if len(term) >= 4 else 1
+    return score
+
+
+def writing_article_type(step: WorkflowStep, payload: dict[str, Any]) -> str:
+    selected = selected_list(payload, "selected_sources", fallback="selected_articles") if step == "brief" else selected_list(payload, "selected_briefs")
+    for item in selected:
+        article_type = first_text({}, item, "type", "article_type", "文章类型")
+        if article_type:
+            return normalize_matrix_type(article_type)
+        title = first_text({}, item, "title", "suggested_title", "文章标题")
+        inferred = infer_article_type_from_text(title)
+        if inferred:
+            return inferred
+    return ""
+
+
+def infer_article_type_from_text(text: str) -> str:
+    value = str(text or "")
+    if any(marker in value for marker in ["横评", "对比", "比较", "区别", "差异", "哪个好"]):
+        return "横评对比文"
+    if any(marker in value for marker in ["证据", "参数", "认证", "报告", "实测", "专利"]):
+        return "产品证据文"
+    if any(marker in value for marker in ["榜单", "推荐", "排名", "清单"]):
+        return "榜单推荐文"
+    if any(marker in value for marker in ["场景", "选购", "怎么选", "指南", "攻略"]):
+        return "场景选购文"
+    if any(marker in value for marker in ["FAQ", "faq", "问答", "问题", "答疑"]):
+        return "FAQ问答文"
+    if any(marker in value for marker in ["标准", "全面解析", "系统解析"]):
+        return "支柱标准文"
+    return ""
+
+
+def writing_material_priorities(article_type: str) -> list[str]:
+    normalized = normalize_matrix_type(article_type)
+    return ARTICLE_TYPE_MATERIAL_PRIORITIES.get(normalized, DEFAULT_WRITING_MATERIAL_PRIORITIES)
+
+
+def is_comparison_article_type(article_type: str) -> bool:
+    return normalize_matrix_type(article_type) == "横评对比文" or infer_article_type_from_text(article_type) == "横评对比文"
+
+
+def material_module_title(module: str, fallback: str) -> str:
+    labels = {
+        "competitor": "# 竞品对比资料",
+        "evidence": "# 核心证据资料",
+        "brand": "# 品牌/产品资料",
+        "keywords": "# 关键词资料",
+        "demand_report": "# 用户需求资料",
+        "expression": "# 表达规范资料",
+        "forbidden": "# 禁用表达资料",
+        "other": "# 补充资料",
+    }
+    return labels.get(module, f"# {fallback}")
+
+
+def comparison_article_material_requirements(has_competitor_material: bool) -> str:
+    if has_competitor_material:
+        return (
+            "本篇为横评对比文，已检索到竞品资料。Brief 必须明确输出：对比对象、对比维度、每个维度对应的资料来源、目标对象差异和资料缺口。"
+            "正文必须包含横评对比表，并在表格后逐维度解释，不能只写泛泛推荐或“各有优势”。"
+        )
+    return (
+        "本篇为横评对比文，但未检索到 competitor__ 竞品资料。Brief 必须标注竞品资料缺口；正文不得虚构竞品参数、价格、排名或测试结论。"
+    )
+
+
+def writing_context_terms(project: Any, step: WorkflowStep, payload: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    selected = selected_list(payload, "selected_sources", fallback="selected_articles") if step == "brief" else selected_list(payload, "selected_briefs")
+    for item in selected:
+        collect_terms_from_value(item, terms)
+    if step == "article":
+        for brief in selected:
+            markdown = brief.get("markdown")
+            if isinstance(markdown, str):
+                collect_terms_from_text(markdown, terms)
+    intake = project.steps["intake"].output if project.steps.get("intake") else {}
+    collect_intake_terms(intake, terms)
+    return unique_query_terms(terms)
+
+
+def collect_intake_terms(intake: dict[str, Any], terms: list[str]) -> None:
+    rows = intake.get("project_intake_table")
+    if not isinstance(rows, list):
+        collect_terms_from_value(intake, terms)
+        return
+    wanted_ids = {
+        "target_industry",
+        "target_category",
+        "target_keywords",
+        "article_title",
+        "article_types",
+        "publishing_channels",
+        "target_brand",
+        "target_product_or_solution",
+        "solution_components",
+        "competitors",
+        "core_evidence",
+    }
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("id") or "") in wanted_ids:
+            collect_terms_from_value(row.get("value"), terms)
+
+
+def collect_terms_from_value(value: Any, terms: list[str]) -> None:
+    if isinstance(value, str):
+        collect_terms_from_text(value, terms)
+    elif isinstance(value, list):
+        for item in value:
+            collect_terms_from_value(item, terms)
+    elif isinstance(value, dict):
+        preferred = [
+            "keyword",
+            "target_keyword",
+            "title",
+            "suggested_title",
+            "type",
+            "article_type",
+            "brief_focus",
+            "required_evidence",
+            "core_evidence",
+            "target_brand",
+            "target_product_or_solution",
+            "competitors",
+            "channels",
+            "channel",
+            "markdown",
+        ]
+        for key in preferred:
+            if key in value:
+                collect_terms_from_value(value.get(key), terms)
+
+
+def collect_terms_from_text(text: str, terms: list[str]) -> None:
+    for part in re.split(r"[，,、；;｜|/\n\r\t（）()【】\[\]{}:：]+", text):
+        value = part.strip()
+        if len(value) >= 2:
+            terms.append(value)
+
+
+def unique_query_terms(terms: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = normalize_query_term(term)
+        if not cleaned or cleaned in seen:
+            continue
+        result.append(cleaned)
+        seen.add(cleaned)
+    result.sort(key=len, reverse=True)
+    return result[:80]
+
+
+def normalize_query_term(term: str) -> str:
+    value = " ".join(str(term or "").split()).strip()
+    if len(value) < 2 or len(value) > 80:
+        return ""
+    if value.lower() in {"none", "null", "true", "false", "completed", "matrix", "breakthrough", "custom"}:
+        return ""
+    return value
+
+
+def score_material_chunks(chunks: list[str], terms: list[str]) -> list[tuple[int, str]]:
+    scored: list[tuple[int, str]] = []
+    for chunk in chunks:
+        score = 0
+        for term in terms:
+            if term and term in chunk:
+                score += 3 if len(term) >= 4 else 1
+        if score:
+            scored.append((score, chunk))
+    scored.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+    return scored
+
+
+def evidence_query_terms(terms: list[str]) -> list[str]:
+    evidence_markers = [
+        "证据",
+        "参数",
+        "认证",
+        "检测",
+        "报告",
+        "专利",
+        "奖项",
+        "案例",
+        "服务",
+        "售后",
+        "标准",
+        "技术",
+        "型号",
+        "产品",
+        "方案",
+    ]
+    return unique_query_terms([*terms, *evidence_markers])
+
+
+def normalize_match_text(value: str) -> str:
+    return " ".join(str(value or "").split()).strip().lower()
+
+
+def unique_dicts_by_identity(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = source_id_for(item) or json.dumps(item, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        result.append(item)
+        seen.add(key)
+    return result
 
 
 def merge_generated_briefs(

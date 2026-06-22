@@ -4,9 +4,10 @@ from pathlib import Path
 STEP_REFERENCES = {
     "intake": ["auto-intake-schema.md"],
     "matrix": ["geo-content-matrix-planner.md"],
+    "demand_matrix": ["demand-driven-content-matrix-planner.md"],
     "breakthrough": ["geo-keyword-breakthrough-planner.md"],
-    "brief": ["article-brief-generator.md"],
-    "article": ["article-draft-generator.md"],
+    "brief": ["current-chain-article-brief-generator.md"],
+    "article": ["current-chain-article-draft-generator.md"],
 }
 
 

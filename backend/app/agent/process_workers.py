@@ -3,9 +3,9 @@ from typing import Any
 
 from app.agent.skill_loader import SkillLoader
 from app.core.config import Settings
-from app.services.local_ocr import LocalOcr
+from app.services.material_ocr import MaterialOcrRunner
 from app.services.parsers import parse_material
-from app.storage.repository import ProjectRepository
+from app.storage.factory import create_project_repository
 
 
 def run_named_worker(worker_name: str, payload: dict[str, Any], progress_queue: Any) -> dict[str, Any]:
@@ -19,45 +19,20 @@ def run_named_worker(worker_name: str, payload: dict[str, Any], progress_queue: 
 def parse_material_worker(payload: dict[str, Any], progress_queue: Any) -> dict[str, Any]:
     settings = Settings(**dict(payload.get("settings") or {}))
     source = Path(str(payload["source"]))
-    filename = str(payload.get("filename") or source.name)
     ocr_enabled = bool(payload.get("ocr_enabled"))
-    ocr_pages = 0
-    local_ocr: LocalOcr | None = None
 
     def emit(message: str) -> None:
         progress_queue.put({"message": message})
 
-    def get_local_ocr() -> LocalOcr:
-        nonlocal local_ocr
-        if not ocr_enabled:
-            raise RuntimeError("本地 OCR 未启用，请开启 ENABLE_LOCAL_OCR 或选择仅文本模式。")
-        if local_ocr is None:
-            local_ocr = LocalOcr(settings)
-        return local_ocr
-
-    def image_ocr(path: Path) -> str:
-        nonlocal ocr_pages
-        emit(f"正在本地 OCR 图片：{filename}")
-        result = get_local_ocr().extract_image(path)
-        ocr_pages += 1
-        return result
-
-    def pdf_page_ocr(path: Path, page_indexes: list[int]) -> dict[int, str]:
-        nonlocal ocr_pages
-        if not page_indexes:
-            return {}
-        emit(f"正在加载本地 OCR 并处理 PDF：{filename}")
-        results = get_local_ocr().extract_pdf_pages(path, page_indexes, progress=emit)
-        ocr_pages += len(results)
-        return results
+    ocr_runner = MaterialOcrRunner(settings, progress=emit)
 
     text = parse_material(
         source,
-        image_ocr=image_ocr if ocr_enabled else None,
-        pdf_page_ocr=pdf_page_ocr if ocr_enabled else None,
+        image_ocr=ocr_runner.extract_image if ocr_enabled and ocr_runner.image_ocr_enabled() else None,
+        pdf_page_ocr=ocr_runner.extract_pdf_pages if ocr_enabled and ocr_runner.pdf_page_ocr_enabled() else None,
         pdf_ocr_max_pages=payload.get("pdf_ocr_max_pages"),
     )
-    return {"text": text, "ocr_pages": ocr_pages}
+    return {"text": text, "ocr_pages": ocr_runner.ocr_pages}
 
 
 def run_step_worker(payload: dict[str, Any], progress_queue: Any) -> dict[str, Any]:
@@ -65,7 +40,7 @@ def run_step_worker(payload: dict[str, Any], progress_queue: Any) -> dict[str, A
 
     settings = Settings(**dict(payload.get("settings") or {}))
     workflow = AgentWorkflow(
-        ProjectRepository(settings.data_root),
+        create_project_repository(settings),
         SkillLoader(settings.skill_root),
         settings,
     )

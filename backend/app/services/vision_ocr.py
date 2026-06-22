@@ -110,8 +110,12 @@ class VisionOcr:
                 {
                     "role": "system",
                     "content": (
-                        "你是资料解析 OCR Agent。请只根据图片内容提取可用于项目资料的信息，"
-                        "包括文字、品牌名、产品型号、证书/奖项/检测信息、参数、排名、截图中的来源和可验证线索。"
+                        "你是资料解析 OCR Agent。请只根据图片内容提取可用于项目资料的信息。"
+                        "如果图片是表格、对比表、截图表或参数表，必须优先还原为 Markdown 表格："
+                        "保留原始列顺序、行标题、品牌分组、产品型号、单位、价格、空值 / 和换行含义；"
+                        "合并表头可以拆成多行表头或写入列名中，但不能打乱列关系。"
+                        "如果图片不是表格，再提取文字、品牌名、产品型号、证书/奖项/检测信息、参数、排名、"
+                        "截图中的来源和可验证线索。看不清的单元格标注“无法确认”，疑似内容标注“疑似”。"
                         "不要虚构看不见的信息。"
                     ),
                 },
@@ -120,7 +124,11 @@ class VisionOcr:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"请解析这份图片资料：{label}。输出结构化 Markdown，保留不确定项。",
+                            "text": (
+                                f"请解析这份图片资料：{label}。输出结构化 Markdown。"
+                                "若存在表格，直接输出完整 Markdown 表格，并在表格后用短句列出无法确认项。"
+                                "不要只输出逐行 OCR 文本。"
+                            ),
                         },
                         {
                             "type": "image_url",
@@ -130,4 +138,5 @@ class VisionOcr:
                 },
             ],
         )
-        return response.choices[0].message.content or "（视觉模型未返回可用 OCR 内容。）"
+        content = response.choices[0].message.content or "（视觉模型未返回可用 OCR 内容。）"
+        return f"视觉 OCR：{self.model}，已按图片结构解析。\n\n{content}"

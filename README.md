@@ -79,7 +79,7 @@ ENABLE_LOCAL_OCR=true
 LOCAL_OCR_ENGINE=rapidocr
 LOCAL_OCR_MAX_PAGES=4
 LOCAL_OCR_MIN_CONFIDENCE=0.35
-ENABLE_VISION_OCR=false
+ENABLE_VISION_OCR=true
 OCR_CONCURRENCY=2
 IMAGE_OCR_MAX_EDGE=1600
 IMAGE_OCR_JPEG_QUALITY=82
@@ -98,18 +98,18 @@ FRONTEND_ORIGIN=http://localhost:5173
 - `PLANNING_BASE_URL=https://api.deepseek.com`：规划模型地址。
 - `PLANNING_MODEL=deepseek-v4-pro`：intake、内容矩阵、逐词击破和外部矩阵 PDF 识别使用的规划模型。
 - `PLANNING_API_MODE=chat`：DeepSeek 官方 OpenAI 兼容接口使用 `chat`。
-- `ENABLE_LOCAL_OCR=true`：开启本地 OCR，图片和扫描 PDF 不调用 GPT。
+- `ENABLE_LOCAL_OCR=true`：开启本地 OCR，作为图片视觉 OCR 失败时的回退，并用于扫描 PDF。
 - `LOCAL_OCR_ENGINE=rapidocr`：本地 OCR 引擎，使用 RapidOCR + ONNXRuntime，支持 Windows/macOS。
 - `LOCAL_OCR_MAX_PAGES=4`：智能快速模式下扫描 PDF 最多 OCR 页数。
 - `LOCAL_OCR_MIN_CONFIDENCE=0.35`：低于该置信度的 OCR 文本会被过滤。
-- `ENABLE_VISION_OCR=false`：默认关闭 GPT 视觉 OCR。
+- `ENABLE_VISION_OCR=true`：图片资料默认优先调用 GPT 视觉 OCR，用于还原截图表、参数表和对比表结构。
 - `OCR_CONCURRENCY=2`：保留给 OCR 并发控制，建议保持 1-3。
 - `IMAGE_OCR_MAX_EDGE=1600`：图片 OCR 前自动压缩的最大边长。
 - `IMAGE_OCR_JPEG_QUALITY=82`：图片 OCR 前转 JPEG 的质量。
 - `BATCH_GENERATION_CONCURRENCY=3`：Brief 和正文批量生成的并发数，建议保持 1-8。
 - `APP_DATA_DIR=app-data`：项目数据保存目录。
 
-图片和扫描版 PDF 默认使用本地 OCR，不依赖中转站图片理解能力。
+图片资料默认优先使用 GPT 视觉 OCR 还原结构，失败时回退本地 OCR；扫描版 PDF 默认使用本地 OCR。
 
 ## 4. 安装依赖
 
@@ -254,7 +254,7 @@ md, txt, json, csv, xlsx, pdf, jpg, jpeg, png, webp
 - 文字资料优先使用 `md`、`txt`、`xlsx`、`csv`。
 - PDF 如果是可复制文字的 PDF，系统会直接抽取文字。
 - 扫描版 PDF 会尝试转图片并使用本地 OCR。
-- 图片资料会尝试使用本地 OCR，不调用 GPT 视觉模型。
+- 图片资料会优先使用 GPT 视觉 OCR 还原结构，失败时回退本地 OCR。
 - 如果图片或 PDF OCR 不稳定，请补充一份文字版说明。
 
 ### 第三步：解析资料
@@ -538,6 +538,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 检查：
 
 - `ENABLE_LOCAL_OCR=true`。
+- `ENABLE_VISION_OCR=true`，且中转站模型支持图片输入。
 - `LOCAL_OCR_ENGINE=rapidocr`。
 - 是否已执行 `pip install -r backend/requirements.txt` 安装 `rapidocr-onnxruntime`。
 

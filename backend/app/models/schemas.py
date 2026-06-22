@@ -8,6 +8,7 @@ WorkflowStep = Literal[
     "materials",
     "intake",
     "matrix",
+    "demand_matrix",
     "breakthrough",
     "brief",
     "article",
@@ -25,11 +26,13 @@ STEP_ORDER: list[WorkflowStep] = [
     "brief",
     "article",
     "archive",
+    "demand_matrix",
 ]
 
 RUNNABLE_STEPS: list[WorkflowStep] = [
     "intake",
     "matrix",
+    "demand_matrix",
     "breakthrough",
     "brief",
     "article",
@@ -160,3 +163,4 @@ class HealthResponse(BaseModel):
     planning_model: str | None = None
     writing_model: str | None = None
     skill_available: bool
+    publishing_frontend_url: str = "http://127.0.0.1:5174"

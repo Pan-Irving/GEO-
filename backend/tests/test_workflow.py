@@ -8,7 +8,7 @@ from reportlab.pdfgen import canvas
 
 from app.agent.skill_loader import SkillLoader
 from app.agent.process_runner import ChildProcessCancelled
-from app.agent.workflow import AgentWorkflow, WorkflowError, build_local_matrix_skeleton, build_matrix_batches, build_selection_prompt_blocks, client_profile_for_step, drop_running_items_after_cancel, mark_article_brief_failed, mark_article_briefs_running, mark_brief_source_failed, mark_brief_sources_running, material_summary_for_step, merge_generated_articles, merge_generated_briefs, normalize_llm_matrix_intent_groups, normalize_matrix_import_output, normalize_planning_output, planning_output_requirements, prior_outputs_for_step, result_to_markdown
+from app.agent.workflow import AgentWorkflow, MATERIAL_PARSER_VERSION, WorkflowError, build_local_matrix_skeleton, build_matrix_batches, build_selection_prompt_blocks, client_profile_for_step, drop_running_items_after_cancel, mark_article_brief_failed, mark_article_briefs_running, mark_brief_source_failed, mark_brief_sources_running, material_summary_for_step, merge_generated_articles, merge_generated_briefs, normalize_llm_matrix_intent_groups, normalize_matrix_import_output, normalize_planning_output, parse_cache_paths, planning_output_requirements, prior_outputs_for_step, result_to_markdown
 from app.core.config import PROJECT_ROOT, Settings
 from app.services.content_plan import ContentPlanError, build_matrix_content_plan, export_content_plan_pdf
 from app.storage.repository import ProjectRepository
@@ -228,6 +228,38 @@ def test_parse_materials_uses_cache_for_reuploaded_file(tmp_path: Path):
     assert saved.materials[0].parsed_chars > 0
 
 
+def test_parse_materials_image_prefers_vision_ocr_table(tmp_path: Path, monkeypatch):
+    from app.services import material_ocr
+
+    class FakeVisionOcr:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def extract_image(self, path: Path) -> str:
+            return "视觉 OCR：fake。\n\n| 参数分类 | 星河F20 |\n| --- | --- |\n| 风量 | 31m3/min |"
+
+    class FailingLocalOcr:
+        def __init__(self, settings):
+            raise AssertionError("图片优先视觉 OCR 时不应初始化本地 OCR")
+
+    monkeypatch.setattr(material_ocr, "VisionOcr", FakeVisionOcr)
+    monkeypatch.setattr(material_ocr, "LocalOcr", FailingLocalOcr)
+    workflow = make_workflow(tmp_path, enable_vision_ocr=True, enable_local_ocr=True)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.add_material(project.id, "rank.jpg", "image/jpeg", b"fake image")
+
+    workflow.parse_materials(project.id, force=True)
+
+    saved = workflow.repository.load_project(project.id)
+    parsed_path = workflow.repository.project_dir(project.id) / str(saved.materials[0].parsed_path)
+    parsed_text = parsed_path.read_text(encoding="utf-8")
+    assert saved.materials[0].status == "parsed"
+    assert saved.materials[0].ocr_pages == 1
+    assert saved.materials[0].parser_version == MATERIAL_PARSER_VERSION
+    assert "| 参数分类 | 星河F20 |" in parsed_text
+    assert "| 风量 | 31m3/min |" in saved.steps["materials"].output["summary"]
+
+
 def test_parse_materials_text_only_parses_image_placeholder_without_ocr(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
@@ -241,6 +273,89 @@ def test_parse_materials_text_only_parses_image_placeholder_without_ocr(tmp_path
     assert saved.materials[0].parse_mode == "text_only"
     assert saved.materials[0].ocr_pages == 0
     assert "未执行本地 OCR" in saved.steps["materials"].output["summary"]
+
+
+def test_parse_materials_image_falls_back_to_local_ocr_when_vision_disabled(tmp_path: Path, monkeypatch):
+    from app.services import material_ocr
+
+    class FailingVisionOcr:
+        def __init__(self, settings):
+            raise AssertionError("视觉 OCR 关闭时不应初始化视觉模型")
+
+    class FakeLocalOcr:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def extract_image(self, path: Path) -> str:
+            return "本地 OCR：fake。\n\n风量\n31m3/min"
+
+    monkeypatch.setattr(material_ocr, "VisionOcr", FailingVisionOcr)
+    monkeypatch.setattr(material_ocr, "LocalOcr", FakeLocalOcr)
+    workflow = make_workflow(tmp_path, enable_vision_ocr=False, enable_local_ocr=True)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.add_material(project.id, "rank.jpg", "image/jpeg", b"fake image")
+
+    workflow.parse_materials(project.id, force=True)
+
+    saved = workflow.repository.load_project(project.id)
+    assert saved.materials[0].status == "parsed"
+    assert saved.materials[0].ocr_pages == 1
+    assert "本地 OCR：fake" in saved.steps["materials"].output["summary"]
+
+
+def test_parse_material_worker_image_prefers_vision_ocr(tmp_path: Path, monkeypatch):
+    from app.agent.process_workers import parse_material_worker
+    from app.services import material_ocr
+
+    class FakeVisionOcr:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def extract_image(self, path: Path) -> str:
+            return "视觉 OCR：fake。\n\n| 参数分类 | 星河F20 |\n| --- | --- |\n| 国补后参考价格 | ￥2499/2599 |"
+
+    class ProgressQueue:
+        def __init__(self):
+            self.messages: list[dict[str, str]] = []
+
+        def put(self, message: dict[str, str]) -> None:
+            self.messages.append(message)
+
+    monkeypatch.setattr(material_ocr, "VisionOcr", FakeVisionOcr)
+    path = tmp_path / "rank.jpg"
+    path.write_bytes(b"fake image")
+    settings = Settings(
+        openai_api_key="test-key",
+        app_data_dir=str(tmp_path),
+        enable_vision_ocr=True,
+        enable_local_ocr=True,
+    )
+
+    result = parse_material_worker(
+        {
+            "settings": settings.model_dump(),
+            "source": str(path),
+            "ocr_enabled": True,
+            "pdf_ocr_max_pages": 4,
+        },
+        ProgressQueue(),
+    )
+
+    assert result["ocr_pages"] == 1
+    assert "| 国补后参考价格 | ￥2499/2599 |" in result["text"]
+
+
+def test_parse_cache_uses_vision_parser_version(tmp_path: Path):
+    workflow = make_workflow(tmp_path, enable_vision_ocr=True, enable_local_ocr=True)
+    project = workflow.repository.create_project("测试项目")
+    material = workflow.repository.add_material(project.id, "rank.jpg", "image/jpeg", b"fake image")
+    source = workflow.repository.materials_dir(project.id) / material.stored_name
+
+    cache_path, _ = parse_cache_paths(workflow.repository, material, source, "smart", workflow.settings)
+
+    assert MATERIAL_PARSER_VERSION == "materials-parser-v4-vision-table-ocr"
+    assert "materials-parser-v4-vision-table-ocr" in str(cache_path)
+    assert "materials-parser-v3-local-ocr" not in str(cache_path)
 
 
 def test_cancel_job_marks_cancelling_and_preserves_stop_state(tmp_path: Path):
@@ -528,15 +643,29 @@ def test_custom_sources_batch_requires_titles(tmp_path: Path):
         workflow.repository.create_custom_sources(project.id, {"titles": ["", "  "], "type": "榜单推荐文"})
 
 
-def test_custom_sources_batch_duplicate_rolls_back(tmp_path: Path):
+def test_custom_sources_batch_duplicate_skips_existing_titles(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
     workflow.repository.create_custom_source(project.id, {"title": "已有标题", "type": "支柱标准文"})
 
-    with pytest.raises(ValueError, match="已存在"):
+    saved = workflow.repository.create_custom_sources(
+        project.id,
+        {"titles": ["新标题", "已有标题"], "type": "榜单推荐文"},
+    )
+
+    assert [source.title for source in saved.custom_sources] == ["已有标题", "新标题"]
+    assert saved.custom_sources[1].type == "榜单推荐文"
+
+
+def test_custom_sources_batch_rejects_when_all_titles_exist(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.create_custom_source(project.id, {"title": "已有标题", "type": "支柱标准文"})
+
+    with pytest.raises(ValueError, match="都已存在"):
         workflow.repository.create_custom_sources(
             project.id,
-            {"titles": ["新标题", "已有标题"], "type": "榜单推荐文"},
+            {"titles": ["已有标题"], "type": "榜单推荐文"},
         )
 
     saved = workflow.repository.load_project(project.id)
@@ -948,15 +1077,130 @@ def test_matrix_material_context_uses_intake_lightweight_notice(tmp_path: Path):
     assert "通用资料" not in text
 
 
-def test_brief_and_article_material_context_still_use_material_summary(tmp_path: Path):
+def test_brief_and_article_material_context_uses_relevant_material_chunks(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
-    summary = "# 资料证据\nB怎么选 专属证据\n"
+    summary = "# 通用资料\n普通背景\n\n# A推荐\nA推荐 专属证据\n\n# B怎么选\nB怎么选 专属证据\n"
     workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True, output={"summary": summary})
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("B怎么选"))
     saved = workflow.repository.load_project(project.id)
 
-    assert "B怎么选 专属证据" in material_summary_for_step(saved, "brief", {}, workflow.settings)
-    assert "B怎么选 专属证据" in material_summary_for_step(saved, "article", {}, workflow.settings)
+    brief_context = material_summary_for_step(
+        saved,
+        "brief",
+        {"selected_sources": [{"source_id": "source-b", "keyword": "B怎么选", "title": "B怎么选标题"}]},
+        workflow.settings,
+    )
+    article_context = material_summary_for_step(
+        saved,
+        "article",
+        {"selected_briefs": [{"id": "brief-b", "source_id": "source-b", "keyword": "B怎么选", "title": "B怎么选标题", "markdown": "# Brief\n\n核心证据：B怎么选 专属证据"}]},
+        workflow.settings,
+    )
+
+    assert "# 当前选题相关资料片段" in brief_context
+    assert "B怎么选 专属证据" in brief_context
+    assert "B怎么选 专属证据" in article_context
+
+
+def add_parsed_material(workflow: AgentWorkflow, project_id: str, filename: str, text: str):
+    material = workflow.repository.add_material(project_id, filename, "text/markdown", text.encode("utf-8"))
+    parsed_path = workflow.repository.parsed_dir(project_id) / f"{material.id}-{filename}.md"
+    parsed_path.write_text(text, encoding="utf-8")
+    material.status = "parsed"
+    material.parsed_path = str(parsed_path.relative_to(workflow.repository.project_dir(project_id)))
+    material.parsed_chars = len(text)
+    workflow.repository.update_material(project_id, material)
+    return material
+
+
+def test_comparison_material_context_prioritizes_competitor_over_brief_prefix(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_parsed_material(workflow, project.id, "brief__旧规划.md", "# 旧规划\n\n旧规划内容 " * 200)
+    add_parsed_material(workflow, project.id, "competitor__竞品对比.md", "# 竞品横评\n\n风量对比：名气F20 31m3/min，美的AK7 PRO 28m3/min。静压对比：名气F20 1500Pa。")
+    add_parsed_material(workflow, project.id, "evidence__核心证据.md", "# 核心证据\n\n名气F20 具备肤感抗污玻璃和一键自旋洗。")
+    add_parsed_material(workflow, project.id, "forbidden__禁用词.md", "# 禁用词\n\n不得写吊打、碾压。")
+    summary = "# brief__旧规划.md\n\n旧规划内容 " * 300
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True, output={"summary": summary})
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("油烟机横评"))
+    saved = workflow.repository.load_project(project.id)
+
+    context = material_summary_for_step(
+        saved,
+        "brief",
+        {"selected_sources": [{"source_id": "source-a", "keyword": "油烟机横评", "type": "横评对比文", "title": "名气F20和美的AK7 PRO哪个好"}]},
+        workflow.settings,
+    )
+
+    assert "# 竞品对比资料" in context
+    assert "风量对比：名气F20 31m3/min" in context
+    assert "# 核心证据资料" in context
+    assert "不得写吊打、碾压" in context
+    assert "# 横评写作硬性要求" in context
+    assert "正文必须包含横评对比表" in context
+    assert "旧规划内容" not in context
+
+
+def test_evidence_article_material_context_prioritizes_evidence_and_brand(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_parsed_material(workflow, project.id, "competitor__竞品对比.md", "# 竞品\n\n竞品资料")
+    add_parsed_material(workflow, project.id, "evidence__核心证据.md", "# 证据\n\n1500Pa 最大静压和 31m3/min 风量。")
+    add_parsed_material(workflow, project.id, "brand__产品资料.md", "# 品牌产品\n\n名气F20 温感联动。")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True, output={"summary": "fallback summary"})
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("名气F20证据"))
+    saved = workflow.repository.load_project(project.id)
+
+    context = material_summary_for_step(
+        saved,
+        "brief",
+        {"selected_sources": [{"source_id": "source-a", "keyword": "名气F20证据", "type": "产品证据文", "title": "名气F20核心证据"}]},
+        workflow.settings,
+    )
+
+    assert context.index("# 核心证据资料") < context.index("# 品牌/产品资料")
+    assert "1500Pa 最大静压" in context
+    assert "名气F20 温感联动" in context
+
+
+def test_scenario_article_material_context_prioritizes_demand_report(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_parsed_material(workflow, project.id, "brand__产品资料.md", "# 品牌\n\n产品基础资料")
+    add_parsed_material(workflow, project.id, "demand_report__用户需求.md", "# 用户需求\n\n开放式厨房用户关注低噪音和油烟扩散。")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True, output={"summary": "fallback summary"})
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("开放式厨房油烟机"))
+    saved = workflow.repository.load_project(project.id)
+
+    context = material_summary_for_step(
+        saved,
+        "brief",
+        {"selected_sources": [{"source_id": "source-a", "keyword": "开放式厨房油烟机", "type": "场景选购文", "title": "开放式厨房油烟机怎么选"}]},
+        workflow.settings,
+    )
+
+    assert context.index("# 用户需求资料") < context.index("# 品牌/产品资料")
+    assert "开放式厨房用户关注低噪音" in context
+
+
+def test_material_context_falls_back_to_summary_without_parsed_files(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    summary = "# 通用资料\n普通背景\n\n# B怎么选\nB怎么选 专属证据\n"
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True, output={"summary": summary})
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("B怎么选"))
+    saved = workflow.repository.load_project(project.id)
+
+    context = material_summary_for_step(
+        saved,
+        "brief",
+        {"selected_sources": [{"source_id": "source-b", "keyword": "B怎么选", "title": "B怎么选标题"}]},
+        workflow.settings,
+    )
+
+    assert "# 当前选题相关资料片段" in context
+    assert "B怎么选 专属证据" in context
 
 
 def test_intake_prompt_includes_canonical_template():
@@ -1045,8 +1289,67 @@ def test_prior_outputs_only_include_upstream_non_material_steps(tmp_path: Path):
 
     assert prior_outputs_for_step(project, "matrix") == {"intake": {"step": "project_intake"}}
     assert set(prior_outputs_for_step(project, "breakthrough")) == {"intake", "matrix"}
-    assert set(prior_outputs_for_step(project, "article")) == {"intake", "matrix", "breakthrough", "brief"}
+    assert set(prior_outputs_for_step(project, "article")) == {"intake", "brief_step_metadata"}
     assert set(prior_outputs_for_step(project, "archive")) == {"intake", "matrix", "breakthrough", "brief", "article"}
+
+
+def test_brief_prior_outputs_use_related_planning_context(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "intake", status="confirmed", output={"step": "project_intake"})
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={
+            "items": [
+                {"source_id": "source-a", "keyword": "A", "type": "榜单推荐文", "title": "A标题"},
+                {"source_id": "source-a-faq", "keyword": "A", "type": "FAQ问答文", "title": "A FAQ"},
+                {"source_id": "source-b", "keyword": "B", "type": "榜单推荐文", "title": "B标题"},
+            ],
+            "evidence_gaps": [{"keyword_or_intent_group": "A", "missing_evidence": "缺检测报告"}],
+            "brief_requirements": [{"field": "证据", "requirement": "解释来源"}],
+        },
+    )
+    project = workflow.repository.load_project(project.id)
+
+    outputs = prior_outputs_for_step(
+        project,
+        "brief",
+        {"selected_sources": [{"source_id": "source-a", "source_step": "matrix", "keyword": "A", "type": "榜单推荐文", "title": "A标题"}]},
+    )
+
+    matrix_context = outputs["related_planning_context"]["matrix"]
+    assert outputs["intake"] == {"step": "project_intake"}
+    assert [item["source_id"] for item in matrix_context["current_items"]] == ["source-a"]
+    assert [item["source_id"] for item in matrix_context["same_keyword_items"]] == ["source-a-faq"]
+    assert [item["source_id"] for item in matrix_context["same_type_or_channel_items"]] == ["source-b"]
+    assert matrix_context["global_constraints"]["evidence_gaps"][0]["missing_evidence"] == "缺检测报告"
+
+
+def test_article_prior_outputs_only_include_selected_brief_and_original_source(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "intake", status="confirmed", output={"step": "project_intake"})
+    workflow.repository.update_step(
+        project.id,
+        "matrix",
+        status="confirmed",
+        output={"items": [{"source_id": "source-a", "keyword": "A", "type": "榜单推荐文", "title": "A标题"}, {"source_id": "source-b", "keyword": "B", "type": "榜单推荐文", "title": "B标题"}]},
+    )
+    workflow.repository.update_step(project.id, "breakthrough", status="confirmed", output={"items": [{"source_id": "source-c", "keyword": "C"}]})
+    project = workflow.repository.load_project(project.id)
+
+    outputs = prior_outputs_for_step(
+        project,
+        "article",
+        {"selected_briefs": [{"id": "brief-a", "source_id": "source-a", "keyword": "A", "type": "榜单推荐文", "title": "A标题", "markdown": "# Brief A"}]},
+    )
+
+    assert set(outputs) == {"intake", "selected_brief_context", "original_planning_context"}
+    assert outputs["selected_brief_context"][0]["markdown"] == "# Brief A"
+    assert outputs["original_planning_context"]["matrix"] == [{"source_id": "source-a", "keyword": "A", "type": "榜单推荐文", "title": "A标题"}]
+    assert outputs["original_planning_context"]["breakthrough"] == []
 
 
 def test_rewrite_step_is_not_created_or_runnable(tmp_path: Path):
@@ -2129,6 +2432,42 @@ def test_batch_generation_concurrency_one_runs_all_items(tmp_path: Path, monkeyp
     assert {item["source_id"] for item in saved.steps["brief"].output["items"]} == {"source-a", "source-b"}
 
 
+def test_parallel_generation_retries_transient_empty_first_item(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path, batch_generation_concurrency=2)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    payload = {
+        "selected_sources": [
+            {"source_id": "source-a", "source_step": "matrix", "keyword": "A", "type": "类型", "title": "标题 A"},
+            {"source_id": "source-b", "source_step": "matrix", "keyword": "B", "type": "类型", "title": "标题 B"},
+        ]
+    }
+    job_id = workflow.start_step(project.id, "brief", payload)
+    attempts: dict[str, int] = {}
+
+    def fake_run(project_id, step, item_payload):
+        selected = item_payload["selected_sources"][0]
+        source_id = selected["source_id"]
+        attempts[source_id] = attempts.get(source_id, 0) + 1
+        if source_id == "source-a" and attempts[source_id] == 1:
+            raise json.JSONDecodeError("Expecting value", "", 0)
+        return {"items": [{"source_id": source_id, "markdown": f"# {selected['title']} Brief"}]}
+
+    monkeypatch.setattr(workflow, "_run_step", fake_run)
+    monkeypatch.setattr("app.agent.workflow.time.sleep", lambda *_args, **_kwargs: None)
+
+    workflow.run_step_job(project.id, job_id, "brief", payload)
+
+    saved = workflow.repository.load_project(project.id)
+    items = {item["source_id"]: item for item in saved.steps["brief"].output["items"]}
+    assert attempts["source-a"] == 2
+    assert attempts["source-b"] == 1
+    assert saved.jobs[0].status == "completed"
+    assert saved.jobs[0].completed_count == 2
+    assert items["source-a"]["status"] == "completed"
+    assert items["source-b"]["status"] == "completed"
+
+
 def test_article_requires_selected_briefs(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
@@ -2336,6 +2675,57 @@ def test_run_step_article_wraps_plain_markdown(tmp_path: Path, monkeypatch):
     assert item["article_audit_status"] == ""
     assert item["markdown"] == "# 正式正文\n\n正文内容"
     assert "不要输出 JSON" in calls[0]["user"]
+
+
+def test_article_regeneration_prompt_uses_previous_article_only_for_anti_duplication(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    confirm_through_breakthrough(workflow, project.id)
+    workflow.repository.update_step(project.id, "brief", status="completed", confirmed=True, output={"items": []})
+    calls: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, settings, profile="default"):
+            self.profile = profile
+
+        def generate_text(self, *, system: str, user: str) -> str:
+            calls.append({"system": system, "user": user})
+            return "# 新正文\n\n按修改意见重写后的内容"
+
+        def generate_json(self, *args, **kwargs):
+            raise AssertionError("article should not use JSON generation")
+
+    monkeypatch.setattr("app.agent.workflow.OpenAIWorkflowClient", FakeClient)
+
+    result = workflow._run_step(
+        project.id,
+        "article",
+        {
+            "force": True,
+            "selected_briefs": [
+                {
+                    "id": "brief-a",
+                    "source_id": "source-a",
+                    "keyword": "A",
+                    "type": "横评对比文",
+                    "title": "标题 A",
+                    "markdown": "# Brief A",
+                    "status": "completed",
+                    "review_notes": "加强横评表格，重写开头",
+                    "previous_article_markdown": "# 旧正文\n\n旧开头和旧结构",
+                },
+            ],
+        },
+    )
+
+    user_prompt = calls[0]["user"]
+    manual_input = user_prompt.split("# 本次人工输入", 1)[1]
+    assert result["items"][0]["markdown"].startswith("# 新正文")
+    assert "# 本次修改意见（强约束）" in user_prompt
+    assert "加强横评表格，重写开头" in user_prompt
+    assert "# 旧正文避重复参考" in user_prompt
+    assert "旧开头和旧结构" in user_prompt
+    assert "previous_article_markdown" not in manual_input
 
 
 def test_article_existing_same_brief_revision_is_rejected(tmp_path: Path):

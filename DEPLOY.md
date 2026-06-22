@@ -44,10 +44,10 @@ ENABLE_LOCAL_OCR=true
 LOCAL_OCR_ENGINE=rapidocr
 LOCAL_OCR_MAX_PAGES=4
 LOCAL_OCR_MIN_CONFIDENCE=0.35
-ENABLE_VISION_OCR=false
+ENABLE_VISION_OCR=true
 ```
 
-说明：图片和扫描 PDF 默认使用本地 RapidOCR，不调用 GPT 视觉模型；抽取表、内容矩阵、Brief、正文等 Agent 生成步骤仍需要中转站 LLM。
+说明：图片默认优先使用 GPT 视觉 OCR 还原表格结构，失败时回退本地 RapidOCR；扫描 PDF 仍默认使用本地 RapidOCR；抽取表、内容矩阵、Brief、正文等 Agent 生成步骤仍需要中转站 LLM。
 
 ## 2. 安装依赖
 

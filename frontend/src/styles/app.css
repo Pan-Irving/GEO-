@@ -876,6 +876,17 @@ p {
   line-height: 1.65;
 }
 
+.content-plan-markdown-section {
+  min-height: min(68vh, 760px);
+}
+
+.content-plan-markdown-report {
+  min-height: min(62vh, 700px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.76;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -893,20 +904,22 @@ p {
 }
 
 .detail-modal {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
-  width: min(760px, 100vw);
-  height: 100vh;
+  width: min(1280px, calc(100vw - 32px));
+  max-width: 100vw;
+  height: 100dvh;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 18px;
   border-left: 1px solid var(--line);
   background: #fff;
   box-shadow: -18px 0 46px rgba(16, 40, 47, 0.16);
-  overflow: auto;
+  overflow: hidden;
 }
 
 .detail-modal.read-only-detail {
-  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -915,6 +928,7 @@ p {
   justify-content: space-between;
   gap: 14px;
   align-items: start;
+  min-width: 0;
   position: sticky;
   top: -18px;
   z-index: 1;
@@ -925,22 +939,34 @@ p {
   backdrop-filter: blur(10px);
 }
 
+.detail-head > div {
+  min-width: 0;
+}
+
 .detail-head h2 {
   margin: 3px 0 0;
+  max-width: 100%;
   font-size: 20px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .detail-kicker {
+  display: block;
+  min-width: 0;
   color: var(--muted);
   font-size: 12px;
   font-weight: 900;
+  overflow-wrap: anywhere;
 }
 
 .detail-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .field-block {
@@ -959,6 +985,9 @@ p {
 .field-block select,
 .field-block textarea {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--text);
@@ -973,10 +1002,13 @@ p {
 }
 
 .field-block textarea {
-  min-height: 330px;
+  min-height: 180px;
   padding: 12px;
   line-height: 1.65;
   resize: vertical;
+  overflow: auto;
+  overflow-wrap: normal;
+  white-space: pre-wrap;
 }
 
 .field-block input:focus,
@@ -989,10 +1021,26 @@ p {
 }
 
 .field-block textarea.notes-area {
-  min-height: 110px;
+  min-height: 88px;
+  max-height: 110px;
+}
+
+.markdown-edit-block {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.markdown-edit-block textarea {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  resize: none;
 }
 
 .read-only-markdown-block {
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -1165,6 +1213,22 @@ p {
 .dashboard-tags .chip {
   flex: 0 0 auto;
   max-width: 260px;
+}
+
+.dashboard-keyword-chip {
+  border-color: rgba(15, 139, 141, 0.28);
+}
+
+.dashboard-keyword-chip.is-active {
+  color: #033f42;
+  border-color: rgba(15, 139, 141, 0.8);
+  background: #b4e3df;
+  box-shadow: 0 0 0 2px rgba(15, 139, 141, 0.16);
+}
+
+.dashboard-keyword-chip.is-empty {
+  cursor: default;
+  opacity: 0.68;
 }
 
 .dashboard-project-meta {
@@ -1446,10 +1510,30 @@ p {
   background: #fff;
 }
 
-.dashboard-matrix-toolbar > span {
+.dashboard-matrix-filter-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dashboard-matrix-filter-meta > span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.dashboard-filter-chip {
+  max-width: 320px;
+  color: #033f42;
+  border-color: rgba(15, 139, 141, 0.52);
+  background: #d9f1ef;
+}
+
+.dashboard-filter-chip svg {
+  flex: 0 0 auto;
 }
 
 .dashboard-search {
@@ -1515,6 +1599,17 @@ p {
 
 .dashboard-matrix tbody th {
   background: #fff;
+}
+
+.dashboard-matrix-empty {
+  height: 96px;
+  padding: 32px 16px;
+  color: var(--muted);
+  background: #f8fbfc;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+  vertical-align: middle;
 }
 
 .matrix-keyword {
@@ -2265,6 +2360,16 @@ p {
 .actions.end {
   justify-content: flex-end;
   margin-top: 12px;
+  min-width: 0;
+}
+
+.detail-modal .actions.end {
+  max-width: 100%;
+  padding-top: 4px;
+}
+
+.detail-modal .actions.end .btn {
+  max-width: 100%;
 }
 
 .bulk-bar {
@@ -2287,6 +2392,141 @@ p {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.import-summary {
+  align-items: flex-start;
+}
+
+.import-file-button {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.import-file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.import-table-wrap {
+  overflow-x: auto;
+}
+
+.import-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+}
+
+.import-table th,
+.import-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.import-table th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  background: #f6fafb;
+}
+
+.import-table td strong {
+  display: block;
+  max-width: 220px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.import-col-file {
+  width: 22%;
+}
+
+.import-col-title {
+  width: 26%;
+}
+
+.import-col-keyword,
+.import-col-type {
+  width: 18%;
+}
+
+.import-col-status {
+  width: 10%;
+}
+
+.import-col-action {
+  width: 6%;
+}
+
+.imported-col-title {
+  width: 28%;
+}
+
+.imported-col-keyword,
+.imported-col-type,
+.imported-col-file {
+  width: 15%;
+}
+
+.imported-col-time,
+.imported-col-status {
+  width: 10%;
+}
+
+.imported-col-action {
+  width: 7%;
+}
+
+.imported-article-table {
+  min-width: 980px;
+}
+
+.imported-source-file {
+  display: block;
+  max-width: 180px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.import-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: var(--text);
+}
+
+.import-input:focus {
+  outline: 0;
+  border-color: var(--brand);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(15, 139, 141, 0.12);
+}
+
+.import-row-invalid {
+  background: #fff8f5;
+}
+
+.import-remove-btn {
+  border: 0;
+  background: transparent;
+  color: #b42318;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.import-remove-btn:hover {
+  text-decoration: underline;
 }
 
 .job-progress {

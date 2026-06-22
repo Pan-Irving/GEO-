@@ -2,6 +2,7 @@ export type WorkflowStep =
   | "materials"
   | "intake"
   | "matrix"
+  | "demand_matrix"
   | "breakthrough"
   | "brief"
   | "article"
@@ -88,6 +89,13 @@ export interface CustomSourceBatchPayload {
   raw?: Record<string, unknown>;
 }
 
+export interface MarkdownArticleImportMeta {
+  filename: string;
+  title: string;
+  keyword: string;
+  type: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -127,14 +135,25 @@ export interface PublishingUsageSummary {
 
 export interface ContentPlan {
   schema_version: string;
+  source?: string;
   project_id: string;
   project_name: string;
   generated_at: string;
+  markdown_report?: string;
   summary: Record<string, unknown>;
   project: Record<string, unknown>;
   keyword_intent_groups: Array<Record<string, unknown>>;
   article_type_pool: Array<Record<string, unknown>>;
   first_round_plans: Array<Record<string, unknown>>;
+  demand_variables?: unknown[];
+  keyword_variable_mapping?: unknown[];
+  content_theme_clusters?: unknown[];
+  title_angle_pool?: unknown[];
+  weekly_publishing_mix?: unknown[];
+  monthly_publishing_mix?: unknown[];
+  daily_supplement_pool?: unknown[];
+  ai_retest_rules?: unknown[];
+  anti_homogenization_requirements?: unknown[];
   shared_supporting_articles: unknown[];
   unified_recommendation_language: unknown[];
   evidence_gaps: unknown[];

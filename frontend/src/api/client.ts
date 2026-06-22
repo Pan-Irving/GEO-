@@ -1,7 +1,6 @@
-import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MatrixImportDraft, ParseMode, Project, PublishingUsageSummary, WorkflowStep } from "./types";
+import type { ContentPlan, CustomSourceBatchPayload, CustomSourcePayload, MarkdownArticleImportMeta, MatrixImportDraft, ParseMode, Project, PublishingUsageSummary, WorkflowStep } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
-const PUBLISHING_API_BASE = import.meta.env.VITE_PUBLISHING_API_BASE || "";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
@@ -56,11 +55,10 @@ async function requestBlob(url: string, init?: RequestInit): Promise<Blob> {
 }
 
 async function optionalPublishingRequest<T>(path: string): Promise<T | null> {
-  if (!PUBLISHING_API_BASE) return null;
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 5000);
   try {
-    const response = await fetch(`${PUBLISHING_API_BASE}${path}`, { signal: controller.signal });
+    const response = await fetch(path, { signal: controller.signal });
     if (!response.ok) return null;
     return response.json() as Promise<T>;
   } catch {
@@ -71,7 +69,7 @@ async function optionalPublishingRequest<T>(path: string): Promise<T | null> {
 }
 
 export const api = {
-  health: () => request<{ status: string; model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean }>("/api/agent/health"),
+  health: () => request<{ status: string; model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean; publishing_frontend_url: string }>("/api/agent/health"),
   listProjects: () => request<Project[]>("/api/projects"),
   createProject: (name: string) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),
@@ -139,6 +137,15 @@ export const api = {
     request<{ project: Project }>(`/api/projects/${projectId}/custom-sources/${encodeURIComponent(sourceId)}`, {
       method: "DELETE"
     }),
+  importMarkdownArticles: (projectId: string, rows: Array<{ file: File; meta: MarkdownArticleImportMeta }>) => {
+    const form = new FormData();
+    rows.forEach(row => form.append("files", row.file));
+    form.append("metadata", JSON.stringify(rows.map(row => row.meta)));
+    return request<{ project: Project }>(`/api/projects/${projectId}/articles/import-md`, {
+      method: "POST",
+      body: form
+    });
+  },
   updateItem: (projectId: string, step: WorkflowStep, itemId: string, payload: Record<string, unknown>) =>
     request<{ project: Project }>(`/api/projects/${projectId}/steps/${step}/items/${encodeURIComponent(itemId)}`, {
       method: "PATCH",
@@ -148,8 +155,10 @@ export const api = {
   cancelJob: (projectId: string, jobId: string) =>
     request<{ project: Project }>(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: "POST" }),
   getOutputs: (projectId: string) => request<{ files: string[] }>(`/api/projects/${projectId}/outputs`),
-  getContentPlan: (projectId: string) => request<ContentPlan>(`/api/projects/${projectId}/content-plan`),
-  exportContentPlanPdf: (projectId: string) => requestBlob(`/api/projects/${projectId}/export/content-plan.pdf`),
+  getContentPlan: (projectId: string, source = "matrix") =>
+    request<ContentPlan>(`/api/projects/${projectId}/content-plan?source=${encodeURIComponent(source)}`),
+  exportContentPlanPdf: (projectId: string, source = "matrix") =>
+    requestBlob(`/api/projects/${projectId}/export/content-plan.pdf?source=${encodeURIComponent(source)}`),
   getPublishingUsageSummary: (projectId: string) =>
-    optionalPublishingRequest<PublishingUsageSummary>(`/api/projects/${encodeURIComponent(projectId)}/usage-summary`)
+    optionalPublishingRequest<PublishingUsageSummary>(`/api/projects/${encodeURIComponent(projectId)}/publishing/usage-summary`)
 };
