@@ -1,23 +1,41 @@
-# GEO 撰文后台 Agent 操作手册
+# GEO 内容生产与发布工作台
 
-本项目是一个本地运行的 GEO 内容生产工具，面向运营人员使用。它由 Python 后台 Agent 和网页控制台组成，可以读取项目资料，按固定流程生成项目信息抽取表、内容矩阵、逐词击破规划、Brief 和正文，并导出 Markdown 文件。
+本项目是一套本地部署的 GEO 内容生产系统，包含两个前端和两个后端：
 
-运营人员不需要修改代码，只需要按本文完成安装、配置、启动和页面操作。
+- **GEO 撰文工作台**：上传项目资料，生成项目信息抽取、内容矩阵、逐词击破规划、Brief、正文，并完成正文审核与定稿归档。
+- **GEO 发布工作台**：同步撰文系统已审核定稿文章，分配员工，登记自营发布、网媒采购和发布结果。
 
-## 1. 电脑准备
+系统支持默认本地存储，也支持 MySQL 部署。MySQL 模式下，撰文看板会只读查询发布库，展示文章是否已发布、是否采购中。
 
-请先确认电脑已经安装以下软件。
+## 目录结构
 
-### 必装软件
+```text
+.
+├── backend/                    # 撰文后端 FastAPI
+├── frontend/                   # 撰文前端 React + Vite
+├── publishing/backend/         # 发布工作台后端 FastAPI
+├── publishing/frontend/        # 发布工作台前端 React + Vite
+├── mindsun-geo-content-flow/   # GEO 内容生产 Skill 与提示词规则
+├── scripts/                    # Windows/macOS 启动和迁移脚本
+├── backend/sql/                # 撰文 MySQL DDL
+├── publishing/backend/sql/     # 发布 MySQL DDL
+├── .env.example                # 环境变量模板
+├── WINDOWS_DEPLOY.md           # Windows 部署说明
+└── MYSQL_DEPLOY.md             # MySQL 部署说明
+```
 
-- Python 3.11 或更高版本。
-- Node.js 20 LTS 或更高版本。
-- 一个可用的 LLM 中转站 API Key。
-- 一个现代浏览器，例如 Chrome、Edge、Safari。
+运行后会生成 `app-data/`，用于保存上传文件、解析结果、导出文件和默认本地数据。不要手动删除它。
 
-### 检查是否安装成功
+## 环境要求
 
-打开终端或 PowerShell，分别输入：
+- Python 3.11 或更高版本
+- Node.js 20 LTS 或更高版本
+- npm
+- Chrome、Edge 或其他现代浏览器
+- 可用的 OpenAI 兼容 LLM API Key
+- 可选：MySQL 8.0 或更高版本
+
+检查环境：
 
 ```bash
 python --version
@@ -25,601 +43,329 @@ node --version
 npm --version
 ```
 
-如果能看到版本号，说明已安装。如果提示找不到命令，需要先安装对应软件。
+## 快速启动
 
-## 2. 项目目录说明
+### Windows
 
-解压项目后，目录大致如下：
+推荐按 [WINDOWS_DEPLOY.md](./WINDOWS_DEPLOY.md) 操作。首次部署：
 
-```text
-geo-writing-agent/
-├── backend/                    # Python 后台 Agent
-├── frontend/                   # 网页控制台
-├── mindsun-geo-content-flow/   # GEO 内容生产 Skill 规则
-├── .env.example                # 环境变量示例
-└── README.md                   # 本操作手册
+```powershell
+.\scripts\install-windows.ps1
 ```
 
-运行后会自动生成：
+编辑 `.env` 后启动全部服务：
 
-```text
-app-data/                       # 项目资料、解析内容、生成结果
+```powershell
+.\scripts\start-all-windows.ps1
 ```
 
-不要手动删除 `app-data/`。它保存了项目、上传资料和输出文件。
+脚本会启动：
 
-## 3. 配置环境变量
+- 撰文后端：`http://127.0.0.1:8000`
+- 撰文前端：`http://127.0.0.1:5173`
+- 发布后端：`http://127.0.0.1:8010`
+- 发布前端：`http://127.0.0.1:5174`
 
-第一次使用时，在项目根目录复制一份环境变量文件：
+### macOS / Linux
+
+复制环境变量：
 
 ```bash
 cp .env.example .env
 ```
 
-Windows PowerShell 使用：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-然后用文本编辑器打开 `.env`，填写中转站配置。
-
-推荐配置：
-
-```env
-OPENAI_API_KEY=你的中转站API_KEY
-OPENAI_BASE_URL=https://你的中转站地址/v1
-OPENAI_MODEL=gpt-5.5
-OPENAI_API_MODE=chat
-PLANNING_API_KEY=你的DeepSeek_API_KEY
-PLANNING_BASE_URL=https://api.deepseek.com
-PLANNING_MODEL=deepseek-v4-pro
-PLANNING_API_MODE=chat
-ENABLE_LOCAL_OCR=true
-LOCAL_OCR_ENGINE=rapidocr
-LOCAL_OCR_MAX_PAGES=4
-LOCAL_OCR_MIN_CONFIDENCE=0.35
-ENABLE_VISION_OCR=true
-OCR_CONCURRENCY=2
-IMAGE_OCR_MAX_EDGE=1600
-IMAGE_OCR_JPEG_QUALITY=82
-BATCH_GENERATION_CONCURRENCY=3
-APP_DATA_DIR=app-data
-FRONTEND_ORIGIN=http://localhost:5173
-```
-
-说明：
-
-- `OPENAI_API_KEY`：写作模型 API Key，主要用于 Brief 和正文生成。
-- `OPENAI_BASE_URL`：写作模型地址；如果使用中转站，通常以 `/v1` 结尾。
-- `OPENAI_MODEL`：Brief、正文等写作步骤使用的模型。
-- `OPENAI_API_MODE=chat`：适配只支持 `/v1/chat/completions` 的中转站。
-- `PLANNING_API_KEY`：规划模型 API Key，建议填写 DeepSeek 官方 Key；为空时规划步骤回退使用 `OPENAI_*`。
-- `PLANNING_BASE_URL=https://api.deepseek.com`：规划模型地址。
-- `PLANNING_MODEL=deepseek-v4-pro`：intake、内容矩阵、逐词击破和外部矩阵 PDF 识别使用的规划模型。
-- `PLANNING_API_MODE=chat`：DeepSeek 官方 OpenAI 兼容接口使用 `chat`。
-- `ENABLE_LOCAL_OCR=true`：开启本地 OCR，作为图片视觉 OCR 失败时的回退，并用于扫描 PDF。
-- `LOCAL_OCR_ENGINE=rapidocr`：本地 OCR 引擎，使用 RapidOCR + ONNXRuntime，支持 Windows/macOS。
-- `LOCAL_OCR_MAX_PAGES=4`：智能快速模式下扫描 PDF 最多 OCR 页数。
-- `LOCAL_OCR_MIN_CONFIDENCE=0.35`：低于该置信度的 OCR 文本会被过滤。
-- `ENABLE_VISION_OCR=true`：图片资料默认优先调用 GPT 视觉 OCR，用于还原截图表、参数表和对比表结构。
-- `OCR_CONCURRENCY=2`：保留给 OCR 并发控制，建议保持 1-3。
-- `IMAGE_OCR_MAX_EDGE=1600`：图片 OCR 前自动压缩的最大边长。
-- `IMAGE_OCR_JPEG_QUALITY=82`：图片 OCR 前转 JPEG 的质量。
-- `BATCH_GENERATION_CONCURRENCY=3`：Brief 和正文批量生成的并发数，建议保持 1-8。
-- `APP_DATA_DIR=app-data`：项目数据保存目录。
-
-图片资料默认优先使用 GPT 视觉 OCR 还原结构，失败时回退本地 OCR；扫描版 PDF 默认使用本地 OCR。
-
-## 4. 安装依赖
-
-第一次使用需要分别安装后端和前端依赖。
-
-### 4.1 安装后端依赖
-
-进入后端目录：
+安装撰文后端：
 
 ```bash
 cd backend
-```
-
-创建 Python 虚拟环境：
-
-```bash
 python -m venv .venv
-```
-
-macOS / Linux 启用虚拟环境：
-
-```bash
 source .venv/bin/activate
-```
-
-Windows PowerShell 启用虚拟环境：
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-安装依赖：
-
-```bash
 pip install -r requirements.txt
+cd ..
 ```
 
-### 4.2 安装前端依赖
-
-新开一个终端，进入前端目录：
+安装撰文前端：
 
 ```bash
 cd frontend
 npm install
+cd ..
 ```
 
-依赖只需要安装一次。以后启动项目不需要重复安装，除非项目代码更新。
-
-## 5. 启动项目
-
-本项目需要同时启动后端和前端，请打开两个终端窗口。
-
-### 5.1 启动后端
-
-终端 1：
+安装发布后端：
 
 ```bash
-cd backend
+cd publishing/backend
+python -m venv .venv
 source .venv/bin/activate
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+pip install -r requirements.txt
+cd ../..
 ```
 
-Windows PowerShell：
+安装发布前端：
+
+```bash
+cd publishing/frontend
+npm install
+cd ../..
+```
+
+分别启动四个服务：
+
+```bash
+./scripts/start-backend.sh
+./scripts/start-frontend.sh
+./scripts/start-publishing-backend.sh
+./scripts/start-publishing-frontend.sh
+```
+
+## 环境变量
+
+首次使用时复制 `.env.example` 为 `.env`，至少填写模型配置：
+
+```env
+OPENAI_API_KEY=你的写作模型_API_KEY
+OPENAI_BASE_URL=https://你的中转站地址/v1
+OPENAI_MODEL=gpt-5.5
+OPENAI_API_MODE=chat
+
+PLANNING_API_KEY=你的规划模型_API_KEY
+PLANNING_BASE_URL=https://api.deepseek.com
+PLANNING_MODEL=deepseek-v4-pro
+PLANNING_API_MODE=chat
+```
+
+如果没有单独规划模型 Key，可以先留空 `PLANNING_API_KEY`，规划步骤会回退使用 `OPENAI_*`。
+
+常用配置：
+
+```env
+ENABLE_LOCAL_OCR=true
+ENABLE_VISION_OCR=true
+BATCH_GENERATION_CONCURRENCY=3
+APP_DATA_DIR=app-data
+FRONTEND_ORIGIN=http://localhost:5173
+WRITING_API_BASE_URL=http://127.0.0.1:8000
+PUBLISHING_FRONTEND_URL=http://127.0.0.1:5174
+```
+
+说明：
+
+- `OPENAI_*`：Brief、正文和视觉 OCR 等写作/理解任务使用。
+- `PLANNING_*`：项目信息抽取、内容矩阵、逐词击破和外部矩阵 PDF 识别使用。
+- `ENABLE_VISION_OCR=true`：图片资料优先用视觉模型识别表格和截图结构。
+- `ENABLE_LOCAL_OCR=true`：扫描 PDF 和视觉 OCR 失败时使用本地 OCR。
+- `PUBLISHING_FRONTEND_URL`：撰文工作台顶部“发布工作台”按钮跳转地址。部署到其他电脑或内网穿透时改这里，重启撰文后端生效。
+
+## 默认存储模式
+
+默认配置：
+
+```env
+WRITING_STORAGE_BACKEND=file
+WRITING_DATABASE_URL=
+PUBLISHING_DATABASE_URL=
+```
+
+含义：
+
+- 撰文项目数据保存在 `app-data/projects/`。
+- 发布工作台使用 `app-data/publishing/publishing.db`。
+- 上传原文件、解析后的 Markdown 和导出文件保存在 `app-data/`。
+
+默认模式适合单机试用和演示。
+
+## MySQL 部署
+
+生产或多人使用建议启用 MySQL。详见 [MYSQL_DEPLOY.md](./MYSQL_DEPLOY.md)。
+
+推荐使用两个库：
+
+```text
+geo_writing     # 撰文系统结构化数据
+geo_publishing  # 发布工作台结构化数据
+```
+
+`.env` 示例：
+
+```env
+WRITING_STORAGE_BACKEND=mysql
+WRITING_DATABASE_URL=mysql+pymysql://geo_user:geo_password@127.0.0.1:3306/geo_writing?charset=utf8mb4
+PUBLISHING_DATABASE_URL=mysql+pymysql://geo_user:geo_password@127.0.0.1:3306/geo_publishing?charset=utf8mb4
+```
+
+导入表结构：
 
 ```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+mysql -u geo_user -p geo_writing < backend\sql\schema.mysql.sql
+mysql -u geo_user -p geo_publishing < publishing\backend\sql\schema.mysql.sql
 ```
 
-看到类似内容代表后端启动成功：
+迁移已有撰文文件数据：
+
+```powershell
+.\backend\.venv\Scripts\python.exe .\scripts\migrate_writing_file_projects_to_mysql.py --dry-run
+.\backend\.venv\Scripts\python.exe .\scripts\migrate_writing_file_projects_to_mysql.py
+```
+
+迁移已有发布 SQLite 数据：
+
+```powershell
+.\publishing\backend\.venv\Scripts\python.exe .\scripts\migrate_publishing_sqlite_to_mysql.py --dry-run
+.\publishing\backend\.venv\Scripts\python.exe .\scripts\migrate_publishing_sqlite_to_mysql.py
+```
+
+注意：MySQL 只保存结构化数据。上传原文件、解析文件和导出文件仍在 `APP_DATA_DIR` 下。
+
+## 发布状态联动
+
+撰文看板中的“已使用 / 采购中”来自发布库，只读查询 `PUBLISHING_DATABASE_URL` 指向的发布数据库。
+
+数据关系：
 
 ```text
-Uvicorn running on http://127.0.0.1:8000
+撰文系统审核通过正文
+  -> 发布工作台同步为 article_snapshots
+  -> 发布工作台登记 publication_records
+  -> 撰文看板只读汇总发布状态
 ```
 
-### 5.2 启动前端
+规则：
 
-终端 2：
+- `published` 记录计入“已使用”。
+- `purchasing` 记录计入“采购中”。
+- 同一篇文章既自营已发布又网媒采购中时，会同时计入“已使用”和“采购中”。
+- 不做跨库外键，不把发布状态回写撰文库。
 
-```bash
-cd frontend
-npm run dev -- --host 127.0.0.1 --port 5173
+## 主要工作流
+
+### 撰文工作台
+
+1. 创建项目。
+2. 上传资料并解析。
+3. 生成并确认项目信息。
+4. 生成内容矩阵、需求驱动矩阵或逐词击破规划。
+5. 勾选规划生成 Brief。
+6. 勾选 Brief 生成正文。
+7. 审核正文并定稿。
+8. 导出 Markdown 或进入发布工作台使用。
+
+支持本地导入 Markdown 定稿，导入后会直接进入定稿归档。
+
+### 发布工作台
+
+1. 管理员登录发布工作台。
+2. 从撰文系统同步项目定稿文章。
+3. 创建员工账号和分配范围。
+4. 员工登记自营发布或网媒采购需求。
+5. 管理员回填网媒采购结果。
+6. 撰文看板自动展示发布使用状态。
+
+默认管理员由 `.env` 控制：
+
+```env
+PUBLISHING_ADMIN_USERNAME=admin
+PUBLISHING_ADMIN_PASSWORD=admin123
+PUBLISHING_ADMIN_DISPLAY_NAME=系统管理员
 ```
 
-看到类似内容代表前端启动成功：
+生产环境请修改默认密码。
 
-```text
-Local: http://127.0.0.1:5173/
-```
+## 打包部署到 Windows
 
-### 5.3 打开网页
+当前仓库提供 Windows 脚本：
 
-浏览器访问：
+- `scripts/install-windows.ps1`：安装 Python/npm 依赖。
+- `scripts/start-all-windows.ps1`：同时启动四个服务。
+- `scripts/start-backend.ps1`：启动撰文后端。
+- `scripts/start-frontend.ps1`：启动撰文前端。
+- `scripts/start-publishing-backend.ps1`：启动发布后端。
+- `scripts/start-publishing-frontend.ps1`：启动发布前端。
 
-```text
-http://127.0.0.1:5173
-```
+打包时不要包含：
 
-如果页面右上角能看到模型名和 Skill 状态，说明前后端连接正常。
+- `.env`
+- `backend/.venv`
+- `publishing/backend/.venv`
+- `node_modules`
+- `release`
 
-## 6. 正确使用流程
+如果要把旧电脑项目文件一起迁移，需要额外复制 `app-data/`。
 
-建议严格按页面左侧流程操作。
+## 常用验证
 
-### 第一步：创建或选择项目
-
-在左侧项目区域：
-
-1. 输入项目名称。
-2. 点击创建项目。
-3. 后续所有资料、输出、日志都会保存在该项目下。
-
-建议项目名称使用客户或项目真实名称，例如：
-
-```text
-老板高端厨电 GEO 内容项目
-```
-
-### 第二步：上传资料
-
-进入 `资料与信息` 页面。
-
-按固定资料入口上传资料：
-
-- 客户需求 brief。
-- 核心关键词表。
-- 品牌 / 产品资料。
-- 核心证据资料。
-- 竞品对比资料。
-- 禁用词与合规边界。
-- 可选补充资料。
-
-支持格式：
-
-```text
-md, txt, json, csv, xlsx, pdf, jpg, jpeg, png, webp
-```
-
-上传建议：
-
-- 文字资料优先使用 `md`、`txt`、`xlsx`、`csv`。
-- PDF 如果是可复制文字的 PDF，系统会直接抽取文字。
-- 扫描版 PDF 会尝试转图片并使用本地 OCR。
-- 图片资料会优先使用 GPT 视觉 OCR 还原结构，失败时回退本地 OCR。
-- 如果图片或 PDF OCR 不稳定，请补充一份文字版说明。
-
-### 第三步：解析资料
-
-资料上传后点击：
-
-```text
-解析资料
-```
-
-解析完成后，资料状态会显示 `parsed`。
-
-如果某个文件解析失败：
-
-- 检查格式是否支持。
-- 检查文件是否损坏。
-- 图片或扫描 PDF 失败时，检查中转站是否支持视觉模型。
-- 可以补充文字版资料后重新解析。
-
-已经解析成功的资料不会重复解析。
-
-### 第四步：生成并确认项目信息
-
-资料解析完成后，点击：
-
-```text
-生成抽取表
-```
-
-系统会自动生成 `项目信息自动抽取与确认` 表。
-
-表格中每一行包含：
-
-- 字段名。
-- 推断值。
-- 来源依据。
-- 置信度。
-- 当前状态。
-
-运营人员需要逐行检查。
-
-如果内容正确：
-
-```text
-点击该行的“确认”
-```
-
-如果内容需要调整：
-
-```text
-点击该行的“修改”
-```
-
-修改只编辑“推断值”。保存后会同步更新：
-
-- 项目数据 `project.json`。
-- 本地输出文件 `01-project-intake.md`。
-
-全部确认后，点击：
-
-```text
-确认项目信息
-```
-
-### 第五步：生成内容矩阵
-
-进入 `规划确认` 页面，点击：
-
-```text
-生成内容矩阵
-```
-
-系统会生成整体内容规划。
-
-如果已经生成过，按钮会变成：
-
-```text
-重新生成内容矩阵
-```
-
-点击后会弹出二次确认。确认后会覆盖旧结果。
-
-### 第六步：确认逐词击破关键词
-
-内容矩阵生成后，在 `内容矩阵` Tab 中选择要进入逐词击破的关键词。
-
-可以：
-
-- 单个勾选。
-- 全选。
-- 清空选择。
-
-选好后点击：
-
-```text
-确认关键词并进入逐词击破
-```
-
-### 第七步：生成逐词击破
-
-切换到 `逐词击破` Tab，点击：
-
-```text
-生成逐词击破
-```
-
-系统会围绕已确认关键词生成固定六类文章规划：
-
-- 支柱标准文。
-- 榜单推荐文。
-- 横评对比文。
-- 场景选购文。
-- 产品证据文。
-- FAQ 问答文。
-
-规划默认按关键词折叠显示。点击 `展开` 可以查看该关键词下的具体文章规划。
-
-### 第八步：新增自定义文章
-
-如果你想生成矩阵和逐词击破之外的文章，可以在 `规划确认` 页面使用：
-
-```text
-新增自定义文章
-```
-
-只需要输入文章标题。
-
-系统会根据标题和项目上下文自动补齐关键词和文章类型。
-
-如果某篇矩阵或逐词击破规划很接近你的想法，也可以点击：
-
-```text
-复制为自定义
-```
-
-然后修改标题。
-
-### 第九步：选择规划并生成 Brief
-
-在 `规划确认` 页面，勾选要生成 Brief 的文章规划。
-
-可选来源包括：
-
-- 内容矩阵规划。
-- 逐词击破规划。
-- 自定义文章。
-
-勾选后点击：
-
-```text
-生成选中 Brief
-```
-
-系统只会为尚未生成 Brief 的选中项生成，已有 Brief 的项目会自动跳过，避免重复消耗额度。
-
-### 第十步：审核和修改 Brief
-
-进入 `Brief 审核` 页面。
-
-你可以：
-
-- 勾选 Brief。
-- 查看 Brief。
-- 修改 Brief Markdown。
-- 保存修改。
-- 重新生成单篇 Brief。
-
-如果修改 Brief，系统会记录版本。已经生成过正文的文章会被标记为基于旧 Brief，需要重新生成正文。
-
-确认 Brief 后，点击：
-
-```text
-确认 Brief
-```
-
-### 第十一步：选择 Brief 并生成正文
-
-在 `Brief 审核` 页面勾选需要生成正文的 Brief，点击：
-
-```text
-生成选中正文
-```
-
-系统会跳转到 `正文审核` 页面。
-
-正文生成后，你可以：
-
-- 查阅正文。
-- 修改正文 Markdown。
-- 保存修改。
-- 单篇重新生成。
-
-### 第十二步：导出 Markdown
-
-页面右上角点击：
-
-```text
-导出 Markdown
-```
-
-系统会下载一个 zip 文件，里面包含当前项目的 Markdown 输出。
-
-本地输出文件也会保存在：
-
-```text
-app-data/projects/<项目ID>/outputs/
-```
-
-常见文件包括：
-
-```text
-01-project-intake.md
-02-content-matrix.md
-03-keyword-breakthrough.md
-briefs/<source_id>-brief.md
-articles/<brief_id>.md
-```
-
-## 7. 页面状态说明
-
-常见状态含义：
-
-- `pending`：还没有开始。
-- `running`：后台正在运行。
-- `completed`：已生成，等待确认。
-- `confirmed`：已确认，可进入下一步。
-- `failed`：失败，需要查看错误提示并重试。
-- `parsed`：资料已解析。
-- `ready_for_brief`：规划已准备好生成 Brief。
-- `已人工修改`：项目信息由人工修改并保存。
-
-如果页面显示 `running` 很久：
-
-1. 点击右上角 `刷新状态`。
-2. 查看页面提示或日志。
-3. 如果后端窗口已经停止，重新启动后端。
-
-## 8. 常见问题
-
-### 8.1 页面打不开
-
-检查前端是否启动：
-
-```text
-http://127.0.0.1:5173
-```
-
-如果打不开，回到前端终端重新运行：
-
-```bash
-npm run dev -- --host 127.0.0.1 --port 5173
-```
-
-### 8.2 页面能打开，但任务不能运行
-
-检查后端是否启动：
+检查撰文后端：
 
 ```text
 http://127.0.0.1:8000/api/agent/health
 ```
 
-如果打不开，回到后端终端重新运行：
-
-```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-### 8.3 提示 API Key 或模型错误
-
-检查 `.env`：
-
-- `OPENAI_API_KEY` 是否填写。
-- `OPENAI_BASE_URL` 是否以 `/v1` 结尾。
-- `OPENAI_MODEL` 是否是中转站支持的模型名。
-- `OPENAI_API_MODE` 是否为 `chat`。
-
-修改 `.env` 后，需要重启后端。
-
-### 8.4 图片或扫描 PDF 没有识别
-
-检查：
-
-- `ENABLE_LOCAL_OCR=true`。
-- `ENABLE_VISION_OCR=true`，且中转站模型支持图片输入。
-- `LOCAL_OCR_ENGINE=rapidocr`。
-- 是否已执行 `pip install -r backend/requirements.txt` 安装 `rapidocr-onnxruntime`。
-
-如果本地 OCR 仍无法识别，请把图片中的内容整理成文字资料后上传。
-
-### 8.5 点击生成后结果为空
-
-先查看是否有错误提示。
-
-常见原因：
-
-- 资料不足。
-- 项目信息未确认。
-- 内容矩阵或逐词击破上一步未确认。
-- 中转站返回格式异常。
-- 模型没有按固定 JSON 模板输出。
-
-可以尝试：
-
-1. 补充资料。
-2. 重新生成当前步骤。
-3. 查看后台终端错误。
-4. 导出 `project.json` 给技术同事排查。
-
-### 8.6 重复点击生成会覆盖吗
-
-规则如下：
-
-- 内容矩阵已存在时，重新生成需要二次确认，会覆盖旧矩阵。
-- Brief 和正文默认增量生成，已有内容会跳过，不会自动覆盖。
-- 单篇 Brief 或正文可以在详情里重新生成。
-- 自定义文章标题重复会被拒绝保存。
-
-### 8.7 修改项目信息后会自动重跑规划吗
-
-不会。
-
-修改项目信息只会更新抽取表和 `01-project-intake.md`。如果希望后续规划使用新的信息，需要手动重新生成内容矩阵或后续步骤。
-
-## 9. 数据备份
-
-所有项目数据都在：
+检查撰文项目：
 
 ```text
-app-data/
+http://127.0.0.1:8000/api/projects
 ```
 
-建议定期备份整个 `app-data/` 目录。
+MySQL 验证：
 
-如果要把项目交给别人继续使用，可以把以下内容一起打包：
-
-```text
-app-data/projects/<项目ID>/
+```sql
+SELECT COUNT(*) FROM geo_writing.writing_projects;
+SELECT COUNT(*) FROM geo_writing.writing_articles;
+SELECT COUNT(*) FROM geo_publishing.users;
+SELECT COUNT(*) FROM geo_publishing.publication_records;
 ```
 
-不要把 `.env` 发给无关人员，因为里面有 API Key。
-
-## 10. 停止服务
-
-后端和前端终端中按：
-
-```text
-Ctrl + C
-```
-
-即可停止服务。
-
-下次使用时重新执行启动后端和启动前端命令即可。
-
-## 11. 给技术同事的验证命令
-
-如果需要检查项目是否正常，可运行：
+前端构建：
 
 ```bash
-cd backend
-pytest
+cd frontend && npm run build
+cd publishing/frontend && npm run build
 ```
+
+后端关键测试：
 
 ```bash
-cd frontend
-npm run build
+pytest backend/tests/test_publishing_usage.py backend/tests/test_health_config.py
 ```
 
-两个命令都通过，说明后端逻辑和前端构建正常。
+## 常见问题
+
+### 撰文平台是否已经使用 MySQL？
+
+执行：
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, "backend")
+from app.core.config import get_settings
+s = get_settings()
+print("WRITING_STORAGE_BACKEND =", s.writing_storage_backend)
+print("WRITING_DATABASE_URL configured =", bool(s.writing_database_url))
+PY
+```
+
+如果输出 `WRITING_STORAGE_BACKEND = mysql` 且连接串已配置，说明配置层已切到 MySQL。再新建一个项目，检查 `geo_writing.writing_projects` 是否新增记录即可确认写入成功。
+
+### Navicat 看不到迁移后的数据？
+
+先刷新 `geo_writing` 库和表。迁移脚本里的 `Target table counts: 0` 是导入前计数；看到 `Imported project...` 和 `Migration complete` 才表示写入完成。
+
+### 发布工作台按钮跳错地址？
+
+修改 `.env`：
+
+```env
+PUBLISHING_FRONTEND_URL=https://你的发布工作台地址
+```
+
+重启撰文后端，刷新浏览器。
+
+### 授权 MySQL 用户时报 1410？
+
+当前 MySQL 账号没有授权能力，或目标用户不存在。可以改用当前可登录 MySQL 的账号配置连接串，或用 root 创建并授权用户。
+
+### 端口被占用？
+
+默认端口是 `8000`、`8010`、`5173`、`5174`。关闭旧服务窗口，或结束占用端口的进程后重启。
+
