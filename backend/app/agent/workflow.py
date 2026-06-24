@@ -13,6 +13,7 @@ from app.models.schemas import RUNNABLE_STEPS, STEP_ORDER, Material, ParseMode, 
 from app.services.material_ocr import MaterialOcrRunner
 from app.services.openai_client import OpenAIWorkflowClient
 from app.services.parsers import parse_material, parse_pdf
+from app.services.project_keywords import filter_allowed_keyword_rows, normalize_keyword_to_allowed, project_allowed_keywords
 from app.storage.repository import ProjectRepository
 from app.utils.files import slugify, utc_now
 
@@ -806,7 +807,8 @@ class AgentWorkflow:
                 current_item=str(draft.get("filename") or ""),
                 message="外部内容矩阵已识别，正在校验固定字段",
             )
-            result = normalize_matrix_import_output(raw)
+            project = self.repository.load_project(project_id)
+            result = normalize_matrix_import_output(raw, allowed_keywords_for_project(project, self.repository))
             stats = matrix_import_stats(result)
             warnings = unique_texts([*normalize_string_list(result.get("warnings")), *matrix_import_warnings(result)])
             result["warnings"] = warnings
@@ -856,7 +858,7 @@ class AgentWorkflow:
         output = draft.get("output")
         if not isinstance(output, dict) or not output.get("items"):
             raise WorkflowError("外部内容矩阵草稿没有可导入的矩阵结果。")
-        result = normalize_matrix_import_output(output)
+        result = normalize_matrix_import_output(output, allowed_keywords_for_project(project, self.repository))
         import_meta = matrix_import_metadata(project, draft)
         result.update(import_meta)
         self.repository.rewrite_latest_output(project, OUTPUT_FILES["matrix"], result_to_markdown("matrix", result))
@@ -926,10 +928,21 @@ class AgentWorkflow:
         if step == "breakthrough":
             project = self.repository.load_project(project_id)
             selected_keywords = confirmed_keywords_from_payload(payload) or confirmed_breakthrough_keywords(project.steps["matrix"].output)
+            allowed_keywords = allowed_keywords_for_project(project, self.repository)
+            if allowed_keywords:
+                allowed_set = set(allowed_keywords)
+                selected_keywords = [
+                    keyword
+                    for keyword in normalize_keyword_list([normalize_keyword_to_allowed(keyword, allowed_keywords) for keyword in selected_keywords])
+                    if keyword in allowed_set
+                ]
             keywords = selected_keywords if payload.get("force") else merge_keyword_lists(
                 normalize_keyword_list(project.steps["breakthrough"].output.get("confirmed_keywords")),
                 selected_keywords,
             )
+            if allowed_keywords:
+                allowed_set = set(allowed_keywords)
+                keywords = [keyword for keyword in keywords if keyword in allowed_set]
             if not keywords:
                 raise WorkflowError("请先在内容矩阵中确认进入逐词击破的关键词。")
             payload["confirmed_keywords"] = keywords
@@ -1067,7 +1080,7 @@ class AgentWorkflow:
                 message="正在基于 intake 规划关键词意图簇",
             )
             skeleton = self._build_llm_matrix_skeleton(project, skeleton, payload)
-            batches = build_matrix_batches(project, skeleton, payload, self.settings)
+            batches = build_matrix_batches(project, skeleton, payload, self.settings, self.repository)
             if not batches:
                 raise WorkflowError("内容矩阵无法拆分批次：未找到可用于生成规划的关键词或意图簇。")
 
@@ -1152,7 +1165,7 @@ class AgentWorkflow:
             self.repository.log(project_id, f"步骤失败：{STEP_LABELS.get(step, step)} - {exc}")
 
     def _build_llm_matrix_skeleton(self, project: Any, skeleton: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        keywords = matrix_seed_keywords(project, skeleton, payload)
+        keywords = matrix_seed_keywords(project, skeleton, payload, self.repository)
         if not keywords:
             return skeleton
         try:
@@ -1606,7 +1619,14 @@ class AgentWorkflow:
             raise WorkflowError("内容矩阵正在生成，请等待完成后再确认关键词。")
         if not matrix_state.output:
             raise WorkflowError("请先生成内容矩阵，再确认进入逐词击破的关键词。")
-        normalized_keywords = normalize_keyword_list(keywords)
+        allowed_keywords = allowed_keywords_for_project(project, self.repository)
+        normalized_keywords = normalize_keyword_list([
+            normalize_keyword_to_allowed(keyword, allowed_keywords)
+            for keyword in keywords
+        ])
+        if allowed_keywords:
+            allowed_set = set(allowed_keywords)
+            normalized_keywords = [keyword for keyword in normalized_keywords if keyword in allowed_set]
         if not normalized_keywords:
             raise WorkflowError("请至少选择 1 个进入逐词击破的关键词。")
         output = dict(matrix_state.output)
@@ -2265,8 +2285,11 @@ def normalize_demand_section_rows(result: dict[str, Any], keys: list[str]) -> li
     return planning_array_by_keys(result, keys)
 
 
-def normalize_matrix_import_output(result: dict[str, Any]) -> dict[str, Any]:
+def normalize_matrix_import_output(result: dict[str, Any], allowed_keywords: list[str] | None = None) -> dict[str, Any]:
     canonical = normalize_matrix_output(result)
+    if allowed_keywords:
+        canonical["items"] = filter_allowed_keyword_rows(canonical.get("items", []), allowed_keywords)
+        canonical["intent_groups"] = filter_intent_groups_to_allowed_keywords(canonical.get("intent_groups", []), allowed_keywords)
     invalid_keywords = [
         str(item.get("title") or item.get("source_id") or "未命名文章")
         for item in canonical.get("items", [])
@@ -2360,17 +2383,22 @@ def extract_matrix_item_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 def normalize_matrix_partial_output(result: dict[str, Any], batch: dict[str, Any], batch_index: int) -> dict[str, Any]:
     rows = extract_matrix_item_rows(result)
+    batch_keywords = normalize_string_list(batch.get("keywords"))
+    strict_keywords = bool(batch.get("strict_keywords"))
     items: list[dict[str, Any]] = []
     for index, row in enumerate(rows, start=1):
         item = normalize_planning_item("matrix", row, index)
+        if strict_keywords:
+            item["keyword"] = normalize_keyword_to_allowed(item.get("keyword"), batch_keywords)
         if not item.get("intent_group"):
             item["intent_group"] = matrix_batch_intent_for_keyword(batch, str(item.get("keyword") or ""))
         if item.get("keyword") == "未标注关键词":
-            batch_keywords = normalize_string_list(batch.get("keywords"))
             if len(batch_keywords) == 1:
                 item["keyword"] = batch_keywords[0]
                 item["source_id"] = planning_source_id("matrix", item["keyword"], item["type"], item["title"], index)
         items.append(item)
+    if strict_keywords:
+        items = filter_allowed_keyword_rows(items, batch_keywords)
     if not items:
         raise WorkflowError(f"内容矩阵第 {batch_index} 批输出格式不符合固定模板：未找到可识别的文章规划 items。")
     return {
@@ -3035,8 +3063,13 @@ def infer_keywords_from_material_summary(summary: str) -> list[str]:
     return unique_texts(candidate for candidate in candidates if 2 <= len(candidate) <= 80)[:20]
 
 
-def build_matrix_batches(project: Any, skeleton: dict[str, Any], payload: dict[str, Any], settings: Settings) -> list[dict[str, Any]]:
+def build_matrix_batches(project: Any, skeleton: dict[str, Any], payload: dict[str, Any], settings: Settings, repository: ProjectRepository | None = None) -> list[dict[str, Any]]:
+    allowed_keywords = allowed_keywords_for_project(project, repository)
+    if allowed_keywords:
+        skeleton["allowed_keywords"] = allowed_keywords
     intent_groups = [group for group in skeleton.get("intent_groups", []) if matrix_record_has_value(group)]
+    if allowed_keywords:
+        intent_groups = filter_intent_groups_to_allowed_keywords(intent_groups, allowed_keywords)
     if not intent_groups:
         intent_groups = [
             {
@@ -3048,7 +3081,7 @@ def build_matrix_batches(project: Any, skeleton: dict[str, Any], payload: dict[s
                 "recommendation_logic": "",
                 "article_types": [],
             }
-            for index, keyword in enumerate(matrix_seed_keywords(project, skeleton, payload), start=1)
+            for index, keyword in enumerate(matrix_seed_keywords(project, skeleton, payload, repository), start=1)
         ]
     if not intent_groups:
         return []
@@ -3060,7 +3093,7 @@ def build_matrix_batches(project: Any, skeleton: dict[str, Any], payload: dict[s
         group_keywords = normalize_string_list(group.get("keywords"))
         for keyword_chunk in chunked_strings(group_keywords, keyword_size):
             if current_groups and len(current_keywords) + len(keyword_chunk) > keyword_size:
-                batches.append({"intent_groups": current_groups, "keywords": current_keywords})
+                batches.append({"intent_groups": current_groups, "keywords": current_keywords, "strict_keywords": bool(allowed_keywords)})
                 current_groups = []
                 current_keywords = []
             group_slice = dict(group)
@@ -3068,11 +3101,14 @@ def build_matrix_batches(project: Any, skeleton: dict[str, Any], payload: dict[s
             current_groups.append(group_slice)
             current_keywords = unique_texts([*current_keywords, *keyword_chunk])
     if current_groups:
-        batches.append({"intent_groups": current_groups, "keywords": current_keywords})
+        batches.append({"intent_groups": current_groups, "keywords": current_keywords, "strict_keywords": bool(allowed_keywords)})
     return batches
 
 
-def matrix_seed_keywords(project: Any, skeleton: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+def matrix_seed_keywords(project: Any, skeleton: dict[str, Any], payload: dict[str, Any], repository: ProjectRepository | None = None) -> list[str]:
+    allowed_keywords = allowed_keywords_for_project(project, repository)
+    if allowed_keywords:
+        return allowed_keywords
     keywords: list[str] = []
     keywords.extend(normalize_string_list(payload.get("target_keywords")))
     keywords.extend(normalize_string_list(payload.get("keywords")))
@@ -3086,6 +3122,42 @@ def matrix_seed_keywords(project: Any, skeleton: dict[str, Any], payload: dict[s
             continue
         keywords.extend(normalize_string_list(row.get("value")))
     return unique_texts(keyword for keyword in keywords if keyword and keyword != "未标注关键词")
+
+
+def allowed_keywords_for_project(project: Any, repository: ProjectRepository | None = None) -> list[str]:
+    project_dir = repository.project_dir(project.id) if repository and hasattr(repository, "project_dir") else None
+    return project_allowed_keywords(project, project_dir)
+
+
+def filter_intent_groups_to_allowed_keywords(intent_groups: list[dict[str, Any]], allowed_keywords: list[str]) -> list[dict[str, Any]]:
+    allowed_set = set(allowed_keywords)
+    filtered: list[dict[str, Any]] = []
+    assigned: set[str] = set()
+    for group in intent_groups:
+        keywords = [
+            normalize_keyword_to_allowed(keyword, allowed_keywords)
+            for keyword in normalize_string_list(group.get("keywords"))
+        ]
+        keywords = unique_texts(keyword for keyword in keywords if keyword in allowed_set)
+        if not keywords:
+            continue
+        next_group = dict(group)
+        next_group["keywords"] = keywords
+        filtered.append(next_group)
+        assigned.update(keywords)
+    for index, keyword in enumerate([keyword for keyword in allowed_keywords if keyword not in assigned], start=1):
+        filtered.append(
+            {
+                "id": f"keyword-extra-{index}",
+                "name": keyword,
+                "keywords": [keyword],
+                "user_question": "",
+                "user_stage": "",
+                "recommendation_logic": "",
+                "article_types": [],
+            }
+        )
+    return filtered
 
 
 def compact_matrix_skeleton_for_prompt(skeleton: dict[str, Any]) -> dict[str, Any]:
@@ -3123,6 +3195,7 @@ def matrix_batch_intent_for_keyword(batch: dict[str, Any], keyword: str) -> str:
 def merge_matrix_batch_outputs(skeleton: dict[str, Any], partials: list[dict[str, Any]]) -> dict[str, Any]:
     sections = [skeleton, *partials]
     items = merge_matrix_items(item for section in sections for item in section.get("items", []) if isinstance(item, dict))
+    items = filter_allowed_keyword_rows(items, normalize_string_list(skeleton.get("allowed_keywords")))
     if not items:
         raise WorkflowError("内容矩阵输出格式不符合固定模板：未找到可识别的文章规划 items。")
     validate_matrix_items(items)
@@ -3131,6 +3204,8 @@ def merge_matrix_batch_outputs(skeleton: dict[str, Any], partials: list[dict[str
         [row for section in sections for row in section.get("intent_groups", []) if isinstance(row, dict)],
         ["id", "name"],
     )
+    if skeleton.get("allowed_keywords"):
+        intent_groups = filter_intent_groups_to_allowed_keywords(intent_groups, normalize_string_list(skeleton.get("allowed_keywords")))
     if not intent_groups:
         intent_groups = derive_intent_groups_from_matrix_items(items)
     if not intent_groups:

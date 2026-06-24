@@ -1324,7 +1324,7 @@ function PlanningView(props: {
   const completedBreakthroughKeywordList = completeBreakthroughKeywords(data.breakthroughPlans);
   const matrixGroupMeta = new Map(data.matrixIntentGroups.map(group => [group.name, group]));
   const demandMatrixGroupMeta = new Map(data.demandMatrixIntentGroups.map(group => [group.name, group]));
-  const planningKeywordOptions = uniqueStrings(allRows.map(item => item.keyword).filter(Boolean));
+  const planningKeywordOptions = projectAllowedKeywords(project).length ? projectAllowedKeywords(project) : uniqueStrings(allRows.map(item => item.keyword).filter(Boolean));
   const planningTypeOptions = orderedArticleTypes(allRows);
   const matrixContentPlanReady = project.steps.matrix.status === "completed" || project.steps.matrix.status === "confirmed";
   const demandMatrixContentPlanReady = project.steps.demand_matrix?.status === "completed" || project.steps.demand_matrix?.status === "confirmed";
@@ -3792,15 +3792,16 @@ function emptyDerivedData(): DerivedData {
 }
 
 function deriveProjectData(project: Project): DerivedData {
-  const matrixPlans = normalizeItems(project.steps.matrix.output, "matrix").filter(item => isCoreArticleType(item.type));
+  const allowedKeywords = projectAllowedKeywords(project);
+  const matrixPlans = canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.matrix.output, "matrix"), allowedKeywords).filter(item => isCoreArticleType(item.type));
   const matrixIntentGroups = normalizeMatrixIntentGroups(project.steps.matrix.output, matrixPlans);
-  const demandMatrixPlans = normalizeItems(project.steps.demand_matrix?.output || {}, "demand_matrix").filter(item => isCoreArticleType(item.type));
+  const demandMatrixPlans = canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.demand_matrix?.output || {}, "demand_matrix"), allowedKeywords).filter(item => isCoreArticleType(item.type));
   const demandMatrixIntentGroups = normalizeMatrixIntentGroups(project.steps.demand_matrix?.output || {}, demandMatrixPlans);
   const matrixKeywordOptions = extractMatrixKeywordOptions(project.steps.matrix.output);
-  const breakthroughPlans = normalizeItems(project.steps.breakthrough.output, "breakthrough").filter(item => isCoreArticleType(item.type));
-  const customPlans = normalizeItems({ items: project.custom_sources || [] }, "custom");
-  const briefs = sortBriefsNewestFirst(normalizeItems(project.steps.brief.output, "brief"));
-  const articles = sortArticlesNewestFirst(normalizeItems(project.steps.article.output, "article"));
+  const breakthroughPlans = canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.breakthrough.output, "breakthrough"), allowedKeywords).filter(item => isCoreArticleType(item.type));
+  const customPlans = canonicalizeItemsForAllowedKeywords(normalizeItems({ items: project.custom_sources || [] }, "custom"), allowedKeywords);
+  const briefs = sortBriefsNewestFirst(canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.brief.output, "brief"), allowedKeywords));
+  const articles = sortArticlesNewestFirst(canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.article.output, "article"), allowedKeywords));
   const briefById = new Map(briefs.map(item => [item.id, item]));
   return {
     intakeRows: normalizeIntake(project.steps.intake.output),
@@ -3810,8 +3811,8 @@ function deriveProjectData(project: Project): DerivedData {
     demandMatrixIntentGroups,
     breakthroughPlans,
     customPlans,
-    matrixKeywords: matrixKeywordOptions.length ? matrixKeywordOptions : uniqueKeywords(matrixPlans),
-    confirmedBreakthroughKeywords: readConfirmedBreakthroughKeywords(project.steps.matrix.output),
+    matrixKeywords: allowedKeywords.length ? allowedKeywords : matrixKeywordOptions.length ? matrixKeywordOptions : uniqueKeywords(matrixPlans),
+    confirmedBreakthroughKeywords: filterAllowedKeywords(readConfirmedBreakthroughKeywords(project.steps.matrix.output), allowedKeywords),
     plans: [...matrixPlans, ...breakthroughPlans, ...customPlans],
     briefs,
     articles,
@@ -3824,7 +3825,8 @@ function deriveDashboardData(project: Project, data: DerivedData, publishingUsag
   const briefById = new Map(data.briefs.map(item => [item.id, item]));
   const articlesByBriefId = new Map(data.articles.map(item => [item.briefId || item.id, item]));
   const allContentItems = [...data.plans, ...data.briefs, ...data.articles];
-  const keywords = uniqueStrings([
+  const allowedKeywords = projectAllowedKeywords(project);
+  const keywords = allowedKeywords.length ? allowedKeywords : uniqueStrings([
     ...data.matrixKeywords,
     ...allContentItems.map(item => item.keyword)
   ]).filter(keyword => keyword && keyword !== "未标注关键词");
@@ -3904,14 +3906,16 @@ function dashboardSummary(project: Project, data: DerivedData, keywordCount: num
     title: project.name,
     brand,
     product,
-    mainKeywords: dashboardMainKeywords(data, profileKeywords),
+    mainKeywords: dashboardMainKeywords(project, data, profileKeywords),
     keywordCount,
     totalPlans: data.plans.length,
     period: projectPeriodLabel(project, data.intakeRows)
   };
 }
 
-function dashboardMainKeywords(data: DerivedData, profileKeywords: string[]): string[] {
+function dashboardMainKeywords(project: Project, data: DerivedData, profileKeywords: string[]): string[] {
+  const allowedKeywords = projectAllowedKeywords(project);
+  if (allowedKeywords.length) return allowedKeywords;
   const intakeKeywords = data.intakeRows
     .filter(row => /关键词/.test(row.field))
     .flatMap(row => row.value.split(/[、，,;；\n]/).map(item => item.trim()));
@@ -3920,6 +3924,34 @@ function dashboardMainKeywords(data: DerivedData, profileKeywords: string[]): st
     ...profileKeywords,
     ...intakeKeywords
   ]).filter(keyword => keyword && keyword !== "未标注关键词");
+}
+
+function projectAllowedKeywords(project: Project): string[] {
+  return uniqueStrings(Array.isArray(project.allowed_keywords) ? project.allowed_keywords : []);
+}
+
+function filterAllowedKeywords(keywords: string[], allowedKeywords: string[]): string[] {
+  if (!allowedKeywords.length) return keywords;
+  const allowedSet = new Set(allowedKeywords);
+  return uniqueStrings(keywords.map(keyword => normalizeKeywordToAllowed(keyword, allowedKeywords)).filter(keyword => allowedSet.has(keyword)));
+}
+
+function canonicalizeItemsForAllowedKeywords(items: ContentItem[], allowedKeywords: string[]): ContentItem[] {
+  if (!allowedKeywords.length) return items;
+  const allowedSet = new Set(allowedKeywords);
+  return items.flatMap(item => {
+    const keyword = normalizeKeywordToAllowed(item.keyword, allowedKeywords);
+    if (!allowedSet.has(keyword)) return [];
+    return [{ ...item, keyword }];
+  });
+}
+
+function normalizeKeywordToAllowed(keyword: string, allowedKeywords: string[]): string {
+  const text = `${keyword || ""}`.trim().replace(/\s+/g, " ");
+  if (!allowedKeywords.length || !text || allowedKeywords.includes(text)) return text;
+  const matches = allowedKeywords.filter(allowed => text.includes(allowed));
+  if (!matches.length) return text;
+  return [...matches].sort((left, right) => text.indexOf(left) - text.indexOf(right))[0];
 }
 
 function projectPeriodLabel(project: Project, intakeRows: IntakeRow[]): string {
@@ -3951,17 +3983,17 @@ function dashboardProgressRow(
   const completed = articles.filter(article => articleIsFinal(article, briefById)).length;
   const used = articles.filter(article => articlePublishedCount(article, publishingUsage) > 0 || itemIsUsed(article)).length;
   const purchasing = articles.filter(article => articlePurchasingCountFor(article, publishingUsage) > 0).length;
-  const total = Math.max(plans.length, briefs.length, articles.length);
+  const progressTotal = Math.max(plans.length, briefs.length, articles.length);
   return {
     id,
     label,
-    plans: total,
+    plans: plans.length,
     briefs: briefs.length,
     articles: articles.length,
     completed,
     used,
     purchasing,
-    percent: percentOf(completed, total),
+    percent: percentOf(completed, progressTotal),
     drilldown
   };
 }
@@ -4195,7 +4227,7 @@ function matrixContentPlanSummary(project: Project, data: DerivedData) {
     ? "imported"
     : "generated";
   return {
-    keywordCount: uniqueKeywords(data.matrixPlans).length,
+    keywordCount: projectAllowedKeywords(project).length || contentPlanKeywordCount(data.matrixPlans, data.matrixIntentGroups),
     planCount: data.matrixPlans.length,
     articleTypeCount: orderedArticleTypes(data.matrixPlans).length,
     evidenceGapCount: contentPlanSectionCount(matrixOutput.evidence_gaps),
@@ -4209,7 +4241,7 @@ function matrixContentPlanSummary(project: Project, data: DerivedData) {
 function demandMatrixContentPlanSummary(project: Project, data: DerivedData) {
   const output = project.steps.demand_matrix?.output || {};
   return {
-    keywordCount: uniqueKeywords(data.demandMatrixPlans).length,
+    keywordCount: projectAllowedKeywords(project).length || contentPlanKeywordCount(data.demandMatrixPlans, data.demandMatrixIntentGroups),
     planCount: data.demandMatrixPlans.length,
     articleTypeCount: orderedArticleTypes(data.demandMatrixPlans).length,
     demandVariableCount: contentPlanSectionCount(output.demand_variables),
@@ -4217,6 +4249,13 @@ function demandMatrixContentPlanSummary(project: Project, data: DerivedData) {
     evidenceGapCount: contentPlanSectionCount(output.evidence_gaps),
     hasSchedule: contentPlanSectionCount(output.weekly_publishing_mix) > 0 || contentPlanSectionCount(output.monthly_publishing_mix) > 0
   };
+}
+
+function contentPlanKeywordCount(items: ContentItem[], intentGroups: MatrixIntentGroup[]): number {
+  return uniqueStrings([
+    ...items.map(item => item.keyword),
+    ...intentGroups.flatMap(group => group.keywords)
+  ]).filter(keyword => keyword && keyword !== "未标注关键词").length;
 }
 
 function matrixImportPrerequisitesReady(project: Project): boolean {

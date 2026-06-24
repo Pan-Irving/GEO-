@@ -14,6 +14,7 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.models.schemas import Project
+from app.services.project_keywords import filter_allowed_keyword_rows, project_allowed_keywords
 from app.storage.repository import ProjectRepository
 from app.utils.files import today, utc_now
 
@@ -60,7 +61,7 @@ PDF_TABLE_STYLE = TableStyle(
 )
 
 
-def build_matrix_content_plan(project: Project, source: str = "matrix") -> dict[str, Any]:
+def build_matrix_content_plan(project: Project, source: str = "matrix", repository: ProjectRepository | None = None) -> dict[str, Any]:
     source = normalize_content_plan_source(source)
     matrix_state = project.steps.get(source)
     if not matrix_state or matrix_state.status not in {"completed", "confirmed"}:
@@ -82,6 +83,8 @@ def build_matrix_content_plan(project: Project, source: str = "matrix") -> dict[
         for item in items
         if content_plan_article_type_allowed(item["type"]) and (item["title"] or item["keyword"] or item["type"])
     ]
+    allowed_keywords = project_allowed_keywords(project, repository.project_dir(project.id) if repository else None)
+    items = filter_allowed_keyword_rows(items, allowed_keywords)
     if not items:
         raise ContentPlanError("内容矩阵缺少可导出的文章规划 items。")
 
@@ -91,7 +94,7 @@ def build_matrix_content_plan(project: Project, source: str = "matrix") -> dict[
     items = [resolve_item_intent_group(item, intent_group_names) for item in items]
     article_type_pool = normalize_article_type_pool(matrix_output.get("article_type_pool"), items, intent_group_names)
     sorted_items = sorted(items, key=content_plan_item_sort_key(intent_groups))
-    keywords = unique_strings(
+    keywords = allowed_keywords or unique_strings(
         [item["keyword"] for item in sorted_items]
         + [keyword for group in intent_groups for keyword in group.get("keywords", [])]
     )
@@ -157,7 +160,7 @@ def build_matrix_content_plan(project: Project, source: str = "matrix") -> dict[
 
 def export_content_plan_pdf(project: Project, repository: ProjectRepository, source: str = "matrix") -> Any:
     source = normalize_content_plan_source(source)
-    plan = build_matrix_content_plan(project, source)
+    plan = build_matrix_content_plan(project, source, repository)
     pdf_bytes = render_content_plan_pdf(plan)
     filename = "02-demand-content-plan.pdf" if source == "demand_matrix" else "02-content-plan.pdf"
     return repository.write_binary_output(project, filename, pdf_bytes)

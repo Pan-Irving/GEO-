@@ -101,6 +101,7 @@ export interface Project {
   name: string;
   created_at: string;
   updated_at: string;
+  allowed_keywords?: string[];
   materials: Material[];
   custom_sources: CustomSource[];
   steps: Record<WorkflowStep, StepState>;
