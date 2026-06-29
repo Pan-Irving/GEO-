@@ -2,6 +2,8 @@
 
 本压缩包用于在 Windows 上部署 GEO 撰文工具和发布工作台。
 
+如果要使用 MySQL 部署，优先阅读 `WINDOWS_MYSQL_DEPLOY_GUIDE.md`；本文保留为 Windows 单机部署快速说明。
+
 本包不包含：
 
 - `app-data/` 历史项目数据

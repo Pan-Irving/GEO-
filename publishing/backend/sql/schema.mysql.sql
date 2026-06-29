@@ -1,6 +1,11 @@
 -- GEO 发布工作台 MySQL 表结构
 -- 适用于 MySQL 8.0+，数据库建议使用 utf8mb4 字符集。
 
+CREATE TABLE IF NOT EXISTS alembic_version (
+  version_num VARCHAR(32) NOT NULL,
+  PRIMARY KEY (version_num)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(64) NOT NULL,
   username VARCHAR(120) NOT NULL,

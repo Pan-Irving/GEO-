@@ -129,6 +129,21 @@ def test_assignment_filters_employee_inventory(tmp_path: Path):
     assert store.visible_projects(employee)[0]["article_count"] == 1
 
 
+def test_faq_short_article_type_is_normalized_for_inventory_and_assignment(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([
+        article_payload("article-1", "关键词 A", "FAQ问答短文"),
+    ])
+    employee = store.create_user({"username": "li", "password": "secret123", "display_name": "李明", "role": "employee"})
+    assignment = store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": ["FAQ问答短文"]})
+
+    inventory = store.inventory("project-1", employee)
+
+    assert assignment["article_types"] == ["FAQ问答文"]
+    assert inventory["articles"][0]["article_type"] == "FAQ问答文"
+    assert inventory["matrix"] == [{"keyword": "关键词 A", "article_type": "FAQ问答文", "total": 1, "available": 1, "published": 0, "purchasing": 0}]
+
+
 def test_sync_can_deactivate_removed_or_empty_project_inventory(tmp_path: Path):
     store = make_store(tmp_path)
     store.upsert_articles([
@@ -143,6 +158,20 @@ def test_sync_can_deactivate_removed_or_empty_project_inventory(tmp_path: Path):
     empty = store.upsert_articles([], project_id="project-1")
     assert empty["deactivated"] == 1
     assert store.usage_summary("project-1")["totals"]["articles"] == 0
+
+
+def test_sync_keeps_imported_robam_history_articles_active(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([
+        article_payload("article-1", "关键词 A", "榜单推荐文"),
+        article_payload("robam-supplement-1", "补充导入-名气", "补充发布文"),
+    ])
+
+    result = store.upsert_articles([article_payload("article-1", "关键词 A", "榜单推荐文")], project_id="project-1")
+    inventory = store.inventory("project-1", store.login("admin", "secret123")["user"])
+
+    assert result["deactivated"] == 0
+    assert [item["article_id"] for item in inventory["articles"]] == ["article-1", "robam-supplement-1"]
 
 
 def test_self_publication_counts_as_published_and_blocks_duplicate_url(tmp_path: Path):
@@ -171,6 +200,35 @@ def test_self_publication_counts_as_published_and_blocks_duplicate_url(tmp_path:
                 "media_name": "知乎",
                 "target_ai_platforms": ["豆包"],
                 "publish_url": "https://example.com/a",
+            },
+        )
+
+
+def test_self_publication_accepts_custom_media_name(tmp_path: Path):
+    store = make_store(tmp_path)
+    store.upsert_articles([article_payload()])
+    employee = store.create_user({"username": "li", "password": "secret123", "display_name": "李明", "role": "employee"})
+    store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+
+    record = store.create_self_publication(
+        employee,
+        {
+            "article_id": "article-1",
+            "media_name": "小红书企业号",
+            "target_ai_platforms": ["豆包"],
+            "publish_url": "https://example.com/custom",
+        },
+    )
+
+    assert record["media_name"] == "小红书企业号"
+    with pytest.raises(ValueError, match="请选择或填写自媒体平台"):
+        store.create_self_publication(
+            employee,
+            {
+                "article_id": "article-1",
+                "media_name": " ",
+                "target_ai_platforms": ["豆包"],
+                "publish_url": "https://example.com/empty-media",
             },
         )
 
@@ -238,11 +296,13 @@ def test_web_publication_is_purchasing_until_admin_marks_published(tmp_path: Pat
             "publisher": "媒介供应商 A",
             "target_ai_platforms": ["DeepSeek"],
             "reference_url": "https://example.com/reference",
+            "published_at": "2026-06-23",
         },
     )
 
     summary = store.usage_summary("project-1")
     assert record["order_status"] == "purchasing"
+    assert record["published_at"] == "2026-06-23"
     assert "发稿方：媒介供应商 A" in record["note"]
     assert summary["totals"]["purchasing"] == 1
     assert summary["totals"]["published"] == 0
@@ -263,8 +323,11 @@ def test_web_publication_is_purchasing_until_admin_marks_published(tmp_path: Pat
     )
 
     assert updated["order_status"] == "published"
+    assert updated["published_at"] == "2026-06-23"
     assert updated["actual_cost"] == 1800
     assert updated["target_ai_platforms"] == ["豆包", "DeepSeek"]
+    changed_date = store.update_publication(record["id"], {"published_at": "2026-06-25"})
+    assert changed_date["published_at"] == "2026-06-25"
     completed_summary = store.usage_summary("project-1")
     assert completed_summary["totals"]["published"] == 1
     assert completed_summary["totals"]["available"] == 0

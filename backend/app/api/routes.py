@@ -12,6 +12,7 @@ from app.models.schemas import (
     ConfirmStepRequest,
     CustomSourceBatchRequest,
     CustomSourceRequest,
+    DeleteStepItemsRequest,
     HealthResponse,
     ParseMaterialsRequest,
     ProjectCreate,
@@ -20,6 +21,7 @@ from app.models.schemas import (
     WorkflowStep,
 )
 from app.services.content_plan import ContentPlanError, build_matrix_content_plan, export_content_plan_pdf
+from app.services.publishing_cleanup import PublishingCleanupError, PublishingCleanupService
 from app.services.publishing_inventory import publishing_articles
 from app.services.publishing_usage import PublishingUsageError, PublishingUsageService
 from app.services.project_keywords import project_allowed_keywords
@@ -40,6 +42,14 @@ def get_skill_loader(settings: Settings = Depends(get_settings)) -> SkillLoader:
 
 def get_publishing_usage_service(settings: Settings = Depends(get_settings)) -> PublishingUsageService:
     return PublishingUsageService(settings.publishing_database_url)
+
+
+def get_publishing_cleanup_service(settings: Settings = Depends(get_settings)) -> PublishingCleanupService:
+    database_url = settings.publishing_database_url.strip()
+    if not database_url:
+        default_publishing_db = settings.data_root / "publishing" / "publishing.db"
+        database_url = f"sqlite:///{default_publishing_db}" if default_publishing_db.exists() else ""
+    return PublishingCleanupService(database_url)
 
 
 def get_workflow(
@@ -315,6 +325,26 @@ async def import_markdown_articles(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.delete("/projects/{project_id}/articles/{article_id}")
+def delete_article(
+    project_id: str,
+    article_id: str,
+    repository: ProjectRepository = Depends(get_repository),
+    publishing_cleanup: PublishingCleanupService = Depends(get_publishing_cleanup_service),
+):
+    try:
+        project = load_or_404(repository, project_id)
+        if not project_has_article(project, article_id):
+            raise FileNotFoundError(f"Article not found: {article_id}")
+        publishing_cleanup_result = publishing_cleanup.delete_article(article_id)
+        project = repository.delete_article(project_id, article_id)
+        return {"project": project_payload(project, repository), "publishing": publishing_cleanup_result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PublishingCleanupError as exc:
+        raise HTTPException(status_code=503, detail="发布库暂不可用，无法删除发布平台对应记录。") from exc
+
+
 @router.patch("/projects/{project_id}/steps/{step}/items/{item_id}")
 def update_step_item(
     project_id: str,
@@ -329,6 +359,23 @@ def update_step_item(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WorkflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/steps/{step}/items/delete")
+def delete_step_items(
+    project_id: str,
+    step: WorkflowStep,
+    payload: DeleteStepItemsRequest,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    try:
+        if step != "brief":
+            raise ValueError("该步骤暂不支持批量删除。")
+        return {"project": project_payload(repository.delete_briefs(project_id, payload.ids), repository)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -369,7 +416,7 @@ def get_content_plan(project_id: str, source: str = "matrix", repository: Projec
 @router.get("/projects/{project_id}/publishing/articles")
 def get_publishing_articles(project_id: str, repository: ProjectRepository = Depends(get_repository)):
     project = load_or_404(repository, project_id)
-    return {"articles": publishing_articles(project)}
+    return {"articles": publishing_articles(project, project_allowed_keywords(project, repository.project_dir(project.id)))}
 
 
 @router.get("/projects/{project_id}/publishing/usage-summary")
@@ -422,3 +469,18 @@ def project_payload(project, repository: ProjectRepository) -> dict:
     project_dir = repository.project_dir(project.id) if hasattr(repository, "project_dir") else None
     data["allowed_keywords"] = project_allowed_keywords(project, project_dir)
     return data
+
+
+def project_has_article(project, article_id: str) -> bool:
+    target_id = str(article_id or "").strip()
+    output = project.steps["article"].output if "article" in project.steps else {}
+    items = output.get("items") if isinstance(output, dict) else None
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        current_id = str(item.get("id") or item.get("article_id") or item.get("articleId") or "").strip()
+        if current_id == target_id:
+            return True
+    return False

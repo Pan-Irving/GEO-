@@ -98,6 +98,13 @@ interface BriefFilterState {
   articleStatus: BriefArticleFilter;
 }
 
+interface LibraryFilterState {
+  keyword: string;
+  articleType: string;
+  archiveDate: string;
+  articleStatus: BriefArticleFilter;
+}
+
 interface PlanningFilterState {
   keyword: string;
   articleType: string;
@@ -177,6 +184,9 @@ interface DashboardData {
     plans: number;
     briefs: number;
     articles: number;
+    writingTotal: number;
+    writingArticles: number;
+    deliveryTotal: number;
     completed: number;
     used: number;
     purchasing: number;
@@ -191,6 +201,13 @@ const emptyBriefFilters: BriefFilterState = {
   keyword: "all",
   articleType: "all",
   briefModified: "all",
+  articleStatus: "all"
+};
+
+const emptyLibraryFilters: LibraryFilterState = {
+  keyword: "all",
+  articleType: "all",
+  archiveDate: "",
   articleStatus: "all"
 };
 
@@ -231,6 +248,9 @@ const materialSlots = [
   { id: "other", name: "其他补充资料", required: false, desc: "访谈纪要、平台截图、历史文章、会议记录等可选补充。" }
 ];
 
+const ACTIVE_REFRESH_MS = 5000;
+const IDLE_REFRESH_MS = 60000;
+
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -245,6 +265,7 @@ function App() {
   const [dashboardDrilldown, setDashboardDrilldown] = useState<DashboardDrilldown | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null);
+  const [deleteArticleTarget, setDeleteArticleTarget] = useState<ContentItem | null>(null);
   const [projectName, setProjectName] = useState("GEO 内容项目");
   const [health, setHealth] = useState<{ model: string; writing_model?: string | null; planning_model?: string | null; skill_available: boolean; publishing_frontend_url?: string } | null>(null);
   const [publishingUsage, setPublishingUsage] = useState<PublishingUsageSummary | null>(null);
@@ -252,6 +273,16 @@ function App() {
   const messageTimerRef = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
   const selectedProjectIdRef = useRef("");
+  const refreshInFlightRef = useRef(false);
+
+  const isProjectBusy = useMemo(
+    () => project?.jobs.some(job =>
+      job.status === "queued" ||
+      job.status === "running" ||
+      job.status === "cancelling"
+    ) ?? false,
+    [project?.jobs]
+  );
 
   useEffect(() => {
     void loadProjects();
@@ -266,9 +297,13 @@ function App() {
 
   useEffect(() => {
     if (!selectedProjectId) return;
-    const timer = window.setInterval(() => void refreshProject(selectedProjectId), 2500);
+    const refreshMs = isProjectBusy ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void refreshProject(selectedProjectId);
+    }, refreshMs);
     return () => window.clearInterval(timer);
-  }, [selectedProjectId]);
+  }, [selectedProjectId, isProjectBusy]);
 
   const data = useMemo(() => project ? deriveProjectData(project) : emptyDerivedData(), [project]);
   const selectedPlanItems = useMemo(
@@ -311,11 +346,18 @@ function App() {
   }
 
   async function refreshProject(projectId: string) {
-    const next = await api.getProject(projectId);
-    if (selectedProjectIdRef.current !== projectId) return;
-    updateProjectState(next);
-    const usage = await api.getPublishingUsageSummary(projectId);
-    if (selectedProjectIdRef.current === projectId) setPublishingUsage(usage);
+    if (refreshInFlightRef.current) return;
+
+    refreshInFlightRef.current = true;
+    try {
+      const next = await api.getProject(projectId);
+      if (selectedProjectIdRef.current !== projectId) return;
+      updateProjectState(next);
+      const usage = await api.getPublishingUsageSummary(projectId);
+      if (selectedProjectIdRef.current === projectId) setPublishingUsage(usage);
+    } finally {
+      refreshInFlightRef.current = false;
+    }
   }
 
   function updateProjectState(next: Project) {
@@ -524,6 +566,55 @@ function App() {
     }, "自定义文章规划已删除。");
   }
 
+  async function deleteArticle(article: ContentItem) {
+    if (!project) return;
+    await run(async () => {
+      const response = await api.deleteArticle(project.id, article.id);
+      updateProjectState(response.project);
+      setSelectedArticles(current => new Set([...current].filter(id => id !== article.id)));
+      setSelectedArchiveArticles(current => new Set([...current].filter(id => id !== article.id)));
+      setDetail(current => current?.item.id === article.id ? null : current);
+      setDeleteArticleTarget(null);
+    }, "定稿正文已删除，发布平台对应记录已同步删除。");
+  }
+
+  async function deleteBriefs(briefs: ContentItem[]) {
+    if (!project || !briefs.length) return;
+    const relatedArticleCount = briefs.filter(brief => data.articles.some(article => article.briefId === brief.id)).length;
+    if (relatedArticleCount) {
+      showMessage(`有 ${relatedArticleCount} 篇 Brief 已生成正文，请先在正文审核页删除关联正文。`);
+      return;
+    }
+    const confirmed = window.confirm(`确认删除 ${briefs.length} 篇 Brief 吗？此操作不可恢复。`);
+    if (!confirmed) return;
+    const ids = briefs.map(item => item.id);
+    await run(async () => {
+      const response = await api.deleteStepItems(project.id, "brief", ids);
+      updateProjectState(response.project);
+      setSelectedBriefs(current => new Set([...current].filter(id => !ids.includes(id))));
+      setDetail(current => current && ids.includes(current.item.id) ? null : current);
+    }, briefs.length === 1 ? "Brief 已删除。" : `已删除 ${briefs.length} 篇 Brief。`);
+  }
+
+  async function deleteArticles(articles: ContentItem[]) {
+    if (!project || !articles.length) return;
+    const confirmed = window.confirm(`确认删除 ${articles.length} 篇正文吗？确认后会同步删除发布平台中对应的文章快照和发布记录，此操作不可恢复。`);
+    if (!confirmed) return;
+    const ids = articles.map(item => item.id);
+    await run(async () => {
+      let nextProject: Project | null = null;
+      for (const article of articles) {
+        const response = await api.deleteArticle(project.id, article.id);
+        nextProject = response.project;
+      }
+      if (nextProject) updateProjectState(nextProject);
+      setSelectedArticles(current => new Set([...current].filter(id => !ids.includes(id))));
+      setSelectedArchiveArticles(current => new Set([...current].filter(id => !ids.includes(id))));
+      setDetail(current => current && ids.includes(current.item.id) ? null : current);
+      setDeleteArticleTarget(null);
+    }, articles.length === 1 ? "正文已删除，发布平台对应记录已同步删除。" : `已删除 ${articles.length} 篇正文，发布平台对应记录已同步删除。`);
+  }
+
   async function importMarkdownArticles(rows: Array<{ file: File; meta: MarkdownArticleImportMeta }>) {
     if (!project) return;
     await run(async () => {
@@ -674,6 +765,7 @@ function App() {
                 setCurrent={setCurrent}
                 openDetail={(item) => setDetail({ step: "brief", item })}
                 regenerateBrief={(item) => regenerateItem("brief", item)}
+                deleteBriefs={deleteBriefs}
                 dismissedJobIds={dismissedJobIds}
                 dismissJob={(jobId) => setDismissedJobIds(current => new Set([...current, jobId]))}
                 cancelJob={cancelJob}
@@ -691,6 +783,7 @@ function App() {
                 confirmBackendStep={confirmBackendStep}
                 openDetail={(item) => setDetail({ step: "article", item })}
                 openAudit={(item) => setDetail({ step: "article", item, mode: "audit" })}
+                deleteArticles={deleteArticles}
                 openBriefDetail={(item) => {
                   setCurrent("brief");
                   setSelectedBriefs(new Set([item.id]));
@@ -721,6 +814,7 @@ function App() {
                 selectedArticles={selectedArchiveArticles}
                 setSelectedArticles={setSelectedArchiveArticles}
                 openDetail={(item) => setDetail({ step: "article", item, mode: "read" })}
+                deleteArticle={(item) => setDeleteArticleTarget(item)}
               />
             )}
           </>
@@ -755,6 +849,22 @@ function App() {
             </div>
           </div>
         )}
+        {deleteArticleTarget && (
+          <div className="modal-backdrop" role="presentation">
+            <div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-article-title">
+              <h2 id="delete-article-title">删除定稿正文</h2>
+              <p>
+                确认删除「{deleteArticleTarget.title}」吗？确认后会删除这篇定稿正文，同时删除发布平台中这篇正文对应的文章快照和发布记录，此操作不可恢复。
+              </p>
+              <div className="actions end">
+                <button className="btn" onClick={() => setDeleteArticleTarget(null)}>取消</button>
+                <button className="btn danger" disabled={busy} onClick={() => void deleteArticle(deleteArticleTarget)}>
+                  <Trash2 size={15} />确认删除
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
@@ -777,7 +887,6 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
   });
   const matrixTypes = dashboard.articleTypes;
   const cellByKey = new Map(dashboard.matrix.map(cell => [`${cell.keyword}\u0001${cell.type}`, cell]));
-  const generatedArticles = dashboard.totals.articles;
   const finalNotUsed = Math.max(dashboard.totals.completed - dashboard.totals.used, 0);
   function toggleKeywordFilter(keyword: string) {
     setSelectedKeywordFilter(current => current === keyword ? "" : keyword);
@@ -835,12 +944,12 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
       </div>
 
       <div className="dashboard-kpi-row">
-        <DashboardKpiCard label="文章规划" value={dashboard.totals.plans} total={dashboard.totals.plans} caption={`${dashboard.totals.pendingPlanCells} 个关键词类型待补`} tone="blue" onClick={() => openDrilldown({ view: "planning", tab: "matrix" })} />
-        <DashboardKpiCard label="Brief 产出" value={dashboard.totals.briefs} total={dashboard.totals.plans} caption={`${dashboard.totals.pendingBriefs} 篇规划待生成`} tone="cyan" onClick={() => openDrilldown({ view: "brief", articleStatus: "not_generated" })} />
-        <DashboardKpiCard label="正文产出" value={generatedArticles} total={dashboard.totals.plans} caption={`${dashboard.totals.pendingArticles} 篇待继续推进`} tone="indigo" onClick={() => openDrilldown({ view: "article" })} />
-        <DashboardKpiCard label="完成定稿" value={dashboard.totals.completed} total={dashboard.totals.plans} caption={`${finalNotUsed} 篇待发布使用`} tone="green" onClick={() => openDrilldown({ view: "article", articleStatus: "approved" })} />
-        <DashboardKpiCard label="采购中" value={dashboard.totals.purchasing} total={dashboard.totals.plans} caption={publishingUsage ? "来自发布系统采购记录" : "未连接发布系统"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "approved" })} />
-        <DashboardKpiCard label="已经使用" value={dashboard.totals.used} total={dashboard.totals.plans} caption={publishingUsage ? "来自发布系统已发布记录" : dashboard.totals.used ? "已标记发布使用" : "暂无已使用标记"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "generated" })} />
+        <DashboardKpiCard label="文章规划" value={dashboard.totals.plans} total={dashboard.totals.writingTotal} caption={`${dashboard.totals.pendingPlanCells} 个关键词类型待补`} tone="blue" onClick={() => openDrilldown({ view: "planning", tab: "matrix" })} />
+        <DashboardKpiCard label="Brief 产出" value={dashboard.totals.briefs} total={dashboard.totals.writingTotal} caption={`${dashboard.totals.pendingBriefs} 篇规划待生成`} tone="cyan" onClick={() => openDrilldown({ view: "brief", articleStatus: "not_generated" })} />
+        <DashboardKpiCard label="正文产出" value={dashboard.totals.writingArticles} total={dashboard.totals.writingTotal} caption={`${dashboard.totals.pendingArticles} 篇待继续推进`} tone="indigo" onClick={() => openDrilldown({ view: "article" })} />
+        <DashboardKpiCard label="完成定稿" value={dashboard.totals.completed} total={dashboard.totals.deliveryTotal} caption={`${finalNotUsed} 篇待发布使用`} tone="green" onClick={() => openDrilldown({ view: "article", articleStatus: "approved" })} />
+        <DashboardKpiCard label="采购中" value={dashboard.totals.purchasing} total={dashboard.totals.deliveryTotal} caption={publishingUsage ? "来自发布系统采购记录" : "未连接发布系统"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "approved" })} />
+        <DashboardKpiCard label="已经使用" value={dashboard.totals.used} total={dashboard.totals.deliveryTotal} caption={publishingUsage ? "来自发布系统已发布记录" : dashboard.totals.used ? "已标记发布使用" : "暂无已使用标记"} tone="orange" onClick={() => openDrilldown({ view: "article", articleStatus: "generated" })} />
       </div>
 
       <section className="dashboard-panel dashboard-matrix-panel">
@@ -922,16 +1031,16 @@ function DashboardView({ project, data, publishingUsage, setCurrent, openDrilldo
           <div className="dashboard-panel-head">
             <div>
               <h2>整体生产进度</h2>
-              <p>以规划文章为基准，查看从 Brief 到发布使用的转化进度。</p>
+              <p>按撰文系统规划与导入定稿口径，查看从 Brief 到发布使用的转化进度。</p>
             </div>
             <Chip text={dashboard.totals.pendingBriefs + dashboard.totals.pendingArticles + dashboard.totals.staleArticles ? "项目资料待处理" : "项目资料齐全"} type={dashboard.totals.pendingBriefs + dashboard.totals.pendingArticles + dashboard.totals.staleArticles ? "warn" : "good"} />
           </div>
           <div className="dashboard-stage-bars">
-            <DashboardStageBar label="已完成规划" value={dashboard.totals.plans} total={dashboard.totals.plans} tone="blue" />
-            <DashboardStageBar label="已生成 Brief" value={dashboard.totals.briefs} total={dashboard.totals.plans} tone="cyan" />
-            <DashboardStageBar label="已生成正文" value={dashboard.totals.articles} total={dashboard.totals.plans} tone="indigo" />
-            <DashboardStageBar label="已完成定稿" value={dashboard.totals.completed} total={dashboard.totals.plans} tone="green" />
-            <DashboardStageBar label="已发布使用" value={dashboard.totals.used} total={dashboard.totals.plans} tone="orange" />
+            <DashboardStageBar label="已完成规划" value={dashboard.totals.plans} total={dashboard.totals.writingTotal} tone="blue" />
+            <DashboardStageBar label="已生成 Brief" value={dashboard.totals.briefs} total={dashboard.totals.writingTotal} tone="cyan" />
+            <DashboardStageBar label="已生成正文" value={dashboard.totals.writingArticles} total={dashboard.totals.writingTotal} tone="indigo" />
+            <DashboardStageBar label="已完成定稿" value={dashboard.totals.completed} total={dashboard.totals.deliveryTotal} tone="green" />
+            <DashboardStageBar label="已发布使用" value={dashboard.totals.used} total={dashboard.totals.deliveryTotal} tone="orange" />
           </div>
         </section>
         <section className="dashboard-panel">
@@ -2330,11 +2439,17 @@ function CustomView(props: {
   const briefBySource = new Map(briefs.map(item => [item.sourceId, item]));
   const articleByBriefId = new Map(articles.map(item => [item.briefId || item.id, item]));
   const customIds = new Set(items.map(item => item.id));
-  const keywordOptions = uniqueStrings(items.map(item => item.keyword).filter(Boolean));
+  const fixedKeywordOptions = projectAllowedKeywords(project);
+  const hasFixedKeywords = fixedKeywordOptions.length > 0;
+  const validCustomItems = items.filter(item => customKeywordIsValid(item, fixedKeywordOptions));
+  const invalidCustomCount = items.length - validCustomItems.length;
+  const keywordOptions = uniqueStrings([...fixedKeywordOptions, ...items.map(item => item.keyword).filter(Boolean)]);
   const articleTypeOptions = orderedArticleTypes(items);
   const filteredItems = filterCustomItems(items, briefBySource, activeFilters);
   const selectedCustomItems = filteredItems.filter(item => selectedPlans.has(item.id));
-  const pendingBriefSources = selectedCustomItems.filter(item => !briefIsGenerated(briefBySource.get(item.sourceId)));
+  const validSelectedCustomItems = selectedCustomItems.filter(item => customKeywordIsValid(item, fixedKeywordOptions));
+  const invalidSelectedCount = selectedCustomItems.length - validSelectedCustomItems.length;
+  const pendingBriefSources = validSelectedCustomItems.filter(item => !briefIsGenerated(briefBySource.get(item.sourceId)));
   const selectedCount = selectedCustomItems.length;
   const briefJob = briefProgressForPlanning(project, null);
   const selectedBriefButtonText = selectedCount === 0
@@ -2374,9 +2489,10 @@ function CustomView(props: {
   }
 
   function setCustomSelection(rows: ContentItem[], selected: boolean) {
+    const selectableRows = rows.filter(item => customKeywordIsValid(item, fixedKeywordOptions));
     setSelectedPlans(current => {
       const next = new Set(current);
-      rows.forEach(item => {
+      selectableRows.forEach(item => {
         if (selected) next.add(item.id);
         else next.delete(item.id);
       });
@@ -2402,12 +2518,14 @@ function CustomView(props: {
       <div className="bulk-bar">
         <div>
           <strong>自定义文章规划</strong>
-          <span>{items.length ? `已添加 ${items.length} 篇自定义文章，可勾选后生成 Brief。` : "批量输入文章标题，选择文章类型后生成 Brief。"}</span>
+          <span>{items.length ? `已添加 ${items.length} 篇自定义文章，可勾选后生成 Brief。` : "批量输入文章标题，逐篇选择关键词和文章类型后生成 Brief。"}</span>
         </div>
         <div className="actions">
-          <button className="btn primary" onClick={() => setBatchModalOpen(true)}><Plus size={15} />批量新增自定义文章</button>
+          <button className="btn primary" disabled={!hasFixedKeywords} title={hasFixedKeywords ? "" : "请先上传并解析核心关键词表"} onClick={() => setBatchModalOpen(true)}><Plus size={15} />批量新增自定义文章</button>
         </div>
       </div>
+      {!hasFixedKeywords && <p className="item-error">请先上传并解析核心关键词表，再新增自定义文章。</p>}
+      {invalidCustomCount > 0 && <p className="item-error">有 {invalidCustomCount} 篇历史自定义文章的关键词不在核心关键词表中，请编辑修正后再生成 Brief。</p>}
 
       <div className="planning-filter-strip custom-filter-strip">
         <div>
@@ -2447,7 +2565,7 @@ function CustomView(props: {
       <div className="bulk-bar selection-bar">
         <div>
           <strong>已选 {selectedCount} 篇自定义文章</strong>
-          <span>{selectedCount ? `其中 ${pendingBriefSources.length} 篇尚未生成 Brief。` : "先勾选自定义文章规划。"}</span>
+          <span>{selectedCount ? `其中 ${pendingBriefSources.length} 篇尚未生成 Brief${invalidSelectedCount ? `，${invalidSelectedCount} 篇需先修正关键词` : ""}。` : "先勾选自定义文章规划。"}</span>
         </div>
         <div className="actions">
           <button className="btn" disabled={!selectedCount} onClick={() => setSelectedPlans(current => new Set([...current].filter(id => !customIds.has(id))))}>清空选择</button>
@@ -2460,6 +2578,7 @@ function CustomView(props: {
         selectedPlans={selectedPlans}
         briefBySource={briefBySource}
         articleByBriefId={articleByBriefId}
+        allowedKeywords={fixedKeywordOptions}
         onEdit={(item) => setCustomModal({ mode: "edit", item })}
         onDelete={(item) => setDeleteCustomItem(item)}
         onSelectionChange={setCustomSelection}
@@ -2469,6 +2588,7 @@ function CustomView(props: {
       {batchModalOpen && (
         <BatchCustomSourceModal
           onClose={() => setBatchModalOpen(false)}
+          keywordOptions={fixedKeywordOptions}
           onSubmit={(payload) => void submitBatch(payload)}
         />
       )}
@@ -2476,6 +2596,7 @@ function CustomView(props: {
         <CustomSourceModal
           mode={customModal.mode}
           item={customModal.item}
+          keywordOptions={fixedKeywordOptions}
           onClose={() => setCustomModal(null)}
           onSubmit={(payload) => void submitCustomSource(payload)}
         />
@@ -2501,6 +2622,7 @@ function CustomPlanningPanel({
   selectedPlans,
   briefBySource,
   articleByBriefId,
+  allowedKeywords,
   onEdit,
   onDelete,
   onSelectionChange,
@@ -2510,18 +2632,20 @@ function CustomPlanningPanel({
   selectedPlans: Set<string>;
   briefBySource: Map<string, ContentItem>;
   articleByBriefId: Map<string, ContentItem>;
+  allowedKeywords: string[];
   onEdit: (item: ContentItem) => void;
   onDelete: (item: ContentItem) => void;
   onSelectionChange: (rows: ContentItem[], selected: boolean) => void;
   onToggle: (item: ContentItem) => void;
 }) {
+  const selectableItems = items.filter(item => customKeywordIsValid(item, allowedKeywords));
   return (
     <Panel
       title={`自定义文章（${items.length} 篇）`}
       icon={<Plus size={16} />}
       aside={
         <div className="actions">
-          {items.length > 0 && <GroupSelectAside rows={items} selectedPlans={selectedPlans} onChange={onSelectionChange} />}
+          {selectableItems.length > 0 && <GroupSelectAside rows={selectableItems} selectedPlans={selectedPlans} onChange={onSelectionChange} />}
         </div>
       }
     >
@@ -2529,23 +2653,26 @@ function CustomPlanningPanel({
         <div className="plan-list">
           {items.map(item => {
             const brief = briefBySource.get(item.sourceId);
+            const keywordValid = customKeywordIsValid(item, allowedKeywords);
             return (
               <PlanRow
                 key={item.id}
                 item={item}
-                selected={selectedPlans.has(item.id)}
+                selected={keywordValid && selectedPlans.has(item.id)}
                 brief={brief}
                 article={articleForPlanItem(item, briefBySource, articleByBriefId)}
-                onToggle={() => onToggle(item)}
+                onToggle={() => keywordValid && onToggle(item)}
                 onEdit={() => onEdit(item)}
                 onDelete={() => onDelete(item)}
-                editDisabled={Boolean(brief?.status)}
+                editDisabled={Boolean(brief?.status) && keywordValid}
+                selectionDisabled={!keywordValid}
+                warning={keywordValid ? "" : "需选择关键词"}
               />
             );
           })}
         </div>
       ) : (
-        <EmptyPanelText text="可以在这里批量添加文章标题，后台会结合项目上下文推断关键词；文章类型由你手动选择，生成 Brief 时不会覆盖已有结果。" />
+        <EmptyPanelText text="可以在这里批量添加文章标题，并逐篇选择固定关键词与文章类型；生成 Brief 时不会覆盖已有结果。" />
       )}
     </Panel>
   );
@@ -2554,17 +2681,20 @@ function CustomPlanningPanel({
 function CustomSourceModal({
   mode,
   item,
+  keywordOptions,
   onClose,
   onSubmit
 }: {
   mode: "create" | "edit" | "copy";
   item?: ContentItem;
+  keywordOptions: string[];
   onClose: () => void;
   onSubmit: (payload: CustomSourcePayload) => void;
 }) {
   const [title, setTitle] = useState(item?.title || "");
+  const [keyword, setKeyword] = useState(item?.keyword && keywordOptions.includes(item.keyword) ? item.keyword : "");
   const [articleType, setArticleType] = useState(item?.type && coreArticleTypes.includes(item.type) ? item.type : coreArticleTypes[0]);
-  const canSubmit = Boolean(title.trim() && articleType);
+  const canSubmit = Boolean(title.trim() && keyword && articleType);
   const modalTitle = mode === "edit" ? "编辑自定义文章" : mode === "copy" ? "复制为自定义文章" : "新增自定义文章";
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -2572,6 +2702,7 @@ function CustomSourceModal({
     if (!canSubmit) return;
     onSubmit({
       title: title.trim(),
+      keyword,
       type: articleType,
       raw: customSourceRawFor(mode, item)
     });
@@ -2586,6 +2717,13 @@ function CustomSourceModal({
           <label className="field-block full">
             <span>标题</span>
             <input value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：企业如何选择 GEO 内容生产工具" />
+          </label>
+          <label className="field-block full">
+            <span>关键词</span>
+            <select value={keyword} onChange={event => setKeyword(event.target.value)}>
+              <option value="">请选择关键词</option>
+              {keywordOptions.map(option => <option key={option} value={option}>{option}</option>)}
+            </select>
           </label>
           <label className="field-block full">
             <span>文章类型</span>
@@ -2605,54 +2743,90 @@ function CustomSourceModal({
 
 function BatchCustomSourceModal({
   onClose,
+  keywordOptions,
   onSubmit
 }: {
   onClose: () => void;
+  keywordOptions: string[];
   onSubmit: (payload: CustomSourceBatchPayload) => void;
 }) {
   const [titlesText, setTitlesText] = useState("");
-  const [articleType, setArticleType] = useState(coreArticleTypes[0]);
+  const [step, setStep] = useState<"input" | "preview">("input");
+  const [rows, setRows] = useState<Array<{ id: string; title: string; keyword: string; type: string }>>([]);
   const titles = uniqueStrings(titlesText.split(/\r?\n/).map(title => title.trim()).filter(Boolean));
-  const canSubmit = titles.length > 0 && Boolean(articleType);
+  const canPreview = titles.length > 0;
+  const canSubmit = rows.length > 0 && rows.every(row => row.title.trim() && row.keyword && row.type);
+
+  function buildPreview() {
+    setRows(titles.map((title, index) => ({ id: `${index}-${title}`, title, keyword: "", type: coreArticleTypes[0] })));
+    setStep("preview");
+  }
+
+  function updateRow(id: string, updates: Partial<{ keyword: string; type: string }>) {
+    setRows(current => current.map(row => row.id === id ? { ...row, ...updates } : row));
+  }
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canSubmit) return;
     onSubmit({
-      titles,
-      type: articleType
+      items: rows.map(row => ({ title: row.title.trim(), keyword: row.keyword, type: row.type }))
     });
   }
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="confirm-modal custom-source-modal" role="dialog" aria-modal="true" aria-labelledby="batch-custom-source-title" onSubmit={submit}>
+      <form className={`confirm-modal custom-source-modal ${step === "preview" ? "custom-source-batch-modal" : ""}`} role="dialog" aria-modal="true" aria-labelledby="batch-custom-source-title" onSubmit={submit}>
         <h2 id="batch-custom-source-title">批量新增自定义文章</h2>
-        <p>一行一个标题，同一批标题共用一个文章类型；保存后可勾选生成 Brief。</p>
-        <div className="form-grid">
-          <label className="field-block full">
-            <span>文章类型</span>
-            <select value={articleType} onChange={event => setArticleType(event.target.value)}>
-              {coreArticleTypes.map(type => <option key={type} value={type}>{type}</option>)}
-            </select>
-          </label>
-          <label className="field-block full">
-            <span>文章标题</span>
-            <textarea
-              className="batch-title-area"
-              value={titlesText}
-              onChange={event => setTitlesText(event.target.value)}
-              placeholder={"万元预算厨电推荐清单\n别墅厨房厨电配置怎么选\n开放式厨房烟机灶具搭配方案"}
-            />
-          </label>
-        </div>
-        <div className="detail-meta">
-          <Chip text={`将新增 ${titles.length} 篇`} type={titles.length ? "good" : "warn"} />
-          <Chip text={articleType} />
-        </div>
+        <p>{step === "input" ? "一行一个标题，下一步逐篇选择固定关键词和文章类型。" : "逐篇选择关键词和文章类型后保存。"}</p>
+        {step === "input" ? (
+          <>
+            <div className="form-grid">
+              <label className="field-block full">
+                <span>文章标题</span>
+                <textarea
+                  className="batch-title-area"
+                  value={titlesText}
+                  onChange={event => setTitlesText(event.target.value)}
+                  placeholder={"万元预算厨电推荐清单\n别墅厨房厨电配置怎么选\n开放式厨房烟机灶具搭配方案"}
+                />
+              </label>
+            </div>
+            <div className="detail-meta">
+              <Chip text={`将新增 ${titles.length} 篇`} type={titles.length ? "good" : "warn"} />
+            </div>
+          </>
+        ) : (
+          <div className="table-wrap custom-batch-table-wrap">
+            <table className="import-table custom-batch-table">
+              <thead><tr><th>标题</th><th>关键词</th><th>文章类型</th></tr></thead>
+              <tbody>
+                {rows.map(row => (
+                  <tr key={row.id}>
+                    <td><strong>{row.title}</strong></td>
+                    <td>
+                      <select value={row.keyword} onChange={event => updateRow(row.id, { keyword: event.target.value })}>
+                        <option value="">请选择关键词</option>
+                        {keywordOptions.map(keyword => <option key={keyword} value={keyword}>{keyword}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={row.type} onChange={event => updateRow(row.id, { type: event.target.value })}>
+                        {coreArticleTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         <div className="actions end">
           <button type="button" className="btn" onClick={onClose}>取消</button>
-          <button type="submit" className="btn primary" disabled={!canSubmit}>保存自定义文章</button>
+          {step === "preview" && <button type="button" className="btn" onClick={() => setStep("input")}>返回修改标题</button>}
+          {step === "input"
+            ? <button type="button" className="btn primary" disabled={!canPreview} onClick={buildPreview}>下一步</button>
+            : <button type="submit" className="btn primary" disabled={!canSubmit}>保存自定义文章</button>}
         </div>
       </form>
     </div>
@@ -2671,13 +2845,14 @@ function BriefView(props: {
   setCurrent: (view: AppView) => void;
   openDetail: (item: ContentItem) => void;
   regenerateBrief: (item: ContentItem) => Promise<void>;
+  deleteBriefs: (items: ContentItem[]) => Promise<void>;
   dismissedJobIds: Set<string>;
   dismissJob: (jobId: string) => void;
   cancelJob: (jobId: string) => Promise<void>;
   dashboardDrilldown?: DashboardDrilldown | null;
   clearDashboardDrilldown?: () => void;
 }) {
-  const { project, items, articles, selectedSourceItems, selectedBriefs, setSelectedBriefs, runBackendStep, setCurrent, openDetail, regenerateBrief, dismissedJobIds, dismissJob, cancelJob, dashboardDrilldown, clearDashboardDrilldown } = props;
+  const { project, items, articles, selectedSourceItems, selectedBriefs, setSelectedBriefs, runBackendStep, setCurrent, openDetail, regenerateBrief, deleteBriefs, dismissedJobIds, dismissJob, cancelJob, dashboardDrilldown, clearDashboardDrilldown } = props;
   const articleByBriefId = new Map(articles.map(item => [item.briefId || item.id, item]));
   const [draftFilters, setDraftFilters] = useState<BriefFilterState>(emptyBriefFilters);
   const [activeFilters, setActiveFilters] = useState<BriefFilterState>(emptyBriefFilters);
@@ -2742,6 +2917,9 @@ function BriefView(props: {
     setDraftFilters(emptyBriefFilters);
     setActiveFilters(emptyBriefFilters);
   }
+  function deleteSelectedBriefs() {
+    void deleteBriefs(selectedVisibleBriefItems);
+  }
   return (
     <div className="section-stack">
       <Panel title="Brief 分组审核" icon={<BadgeAlert size={16} />} aside={<Chip text={`已生成 ${items.length} 篇 Brief`} type={items.length ? "brand" : "warn"} />}>
@@ -2786,6 +2964,7 @@ function BriefView(props: {
         </div>
         <div className="actions block-actions">
           <button className="btn" disabled={!filteredItems.length} onClick={toggleAllBriefs}>{allBriefsSelected ? "取消全选" : "全选 Brief"}</button>
+          <button className="btn danger" disabled={!selectedVisibleBriefItems.length} onClick={deleteSelectedBriefs}><Trash2 size={15} />删除 Brief</button>
           <button className="btn primary" disabled={!pendingArticleBriefs.length} onClick={() => void generateSelectedArticles()}>{articleButtonText}</button>
         </div>
         <p className="muted">
@@ -2816,9 +2995,10 @@ function BriefView(props: {
                   <TimeStampChip label="Brief时间" value={itemGeneratedTimestampLabel(item)} />
                   <div className="row-actions">
                     <button className="btn" onClick={() => openDetail(item)}><BookOpen size={15} />查阅/编辑</button>
-                    <button className="btn" disabled={item.status === "running"} onClick={() => void regenerateBrief(item)}>
-                      <RefreshCw size={15} />{item.status === "failed" ? "重试" : "重新生成"}
-                    </button>
+	                    <button className="btn" disabled={item.status === "running"} onClick={() => void regenerateBrief(item)}>
+	                      <RefreshCw size={15} />{item.status === "failed" ? "重试" : "重新生成"}
+	                    </button>
+	                    <button className="btn danger" disabled={item.status === "running"} onClick={() => void deleteBriefs([item])}><Trash2 size={15} />删除</button>
                   </div>
                 </div>
                 <p className="card-excerpt">{item.role}</p>
@@ -2841,6 +3021,7 @@ function ArticleView(props: {
   confirmBackendStep: (step: WorkflowStep) => Promise<void>;
   openDetail: (item: ContentItem) => void;
   openAudit: (item: ContentItem) => void;
+  deleteArticles: (items: ContentItem[]) => Promise<void>;
   openBriefDetail: (item: ContentItem) => void;
   regenerateArticle: (item: ContentItem) => Promise<void>;
   dismissedJobIds: Set<string>;
@@ -2849,7 +3030,7 @@ function ArticleView(props: {
   dashboardDrilldown?: DashboardDrilldown | null;
   clearDashboardDrilldown?: () => void;
 }) {
-  const { project, items, briefs, selectedArticles, setSelectedArticles, openDetail, openAudit, openBriefDetail, dismissedJobIds, dismissJob, cancelJob, dashboardDrilldown, clearDashboardDrilldown } = props;
+  const { project, items, briefs, selectedArticles, setSelectedArticles, openDetail, openAudit, deleteArticles, openBriefDetail, dismissedJobIds, dismissJob, cancelJob, dashboardDrilldown, clearDashboardDrilldown } = props;
   const briefById = new Map(briefs.map(item => [item.id, item]));
   const [draftFilters, setDraftFilters] = useState<BriefFilterState>(emptyBriefFilters);
   const [activeFilters, setActiveFilters] = useState<BriefFilterState>(emptyBriefFilters);
@@ -2945,6 +3126,7 @@ function ArticleView(props: {
         <div><strong>正文折叠审核</strong><span>{items.length ? `已生成 ${items.length} 篇正文，当前显示 ${filteredItems.length} 篇，已选 ${selectedArticleItems.length} 篇。` : "暂无正文结果。"}</span></div>
         <div className="actions">
           <button className="btn" disabled={!filteredItems.length} onClick={toggleAllArticles}>{allSelected ? "取消全选" : "全选正文"}</button>
+          <button className="btn danger" disabled={!selectedArticleItems.length} onClick={() => void deleteArticles(selectedArticleItems)}><Trash2 size={15} />删除正文</button>
           <button className="btn primary" disabled={!selectedArticleItems.length} onClick={exportSelectedArticles}><Download size={15} />导出正文</button>
         </div>
       </div>
@@ -2979,12 +3161,13 @@ function ArticleView(props: {
                   <AuditStatusBlock item={item} />
                   <div className="row-actions">
                     <button className="btn" onClick={() => openDetail(item)}><BookOpen size={15} />查阅/编辑</button>
-                    {articleAuditApproved(item) ? (
-                      <button className="btn" disabled><CheckCircle2 size={15} />已审核</button>
-                    ) : (
-                      <button className="btn" disabled={item.status === "running" || !item.markdown || !boundBriefReady} onClick={() => openAudit(item)}><CheckCircle2 size={15} />进入审核</button>
-                    )}
-                  </div>
+	                    {articleAuditApproved(item) ? (
+	                      <button className="btn" disabled><CheckCircle2 size={15} />已审核</button>
+	                    ) : (
+	                      <button className="btn" disabled={item.status === "running" || !item.markdown || !boundBriefReady} onClick={() => openAudit(item)}><CheckCircle2 size={15} />进入审核</button>
+	                    )}
+	                    <button className="btn danger" disabled={item.status === "running"} onClick={() => void deleteArticles([item])}><Trash2 size={15} />删除</button>
+	                  </div>
                 </div>
                 {(item.error || item.staleReason) && <p className={item.staleReason ? "item-warning" : "item-error"}>{item.error || item.staleReason}</p>}
               </article>
@@ -3210,26 +3393,27 @@ function MarkdownImportView({
   );
 }
 
-function LibraryView({ project, data, selectedArticles, setSelectedArticles, openDetail }: {
+function LibraryView({ project, data, selectedArticles, setSelectedArticles, openDetail, deleteArticle }: {
   project: Project;
   data: DerivedData;
   selectedArticles: Set<string>;
   setSelectedArticles: React.Dispatch<React.SetStateAction<Set<string>>>;
   openDetail: (item: ContentItem) => void;
+  deleteArticle: (item: ContentItem) => void;
 }) {
   const briefById = new Map(data.briefs.map(item => [item.id, item]));
   const finalItems = data.articles.filter(item => articleIsFinal(item, briefById));
-  const [draftFilters, setDraftFilters] = useState<BriefFilterState>(emptyBriefFilters);
-  const [activeFilters, setActiveFilters] = useState<BriefFilterState>(emptyBriefFilters);
+  const [draftFilters, setDraftFilters] = useState<LibraryFilterState>(emptyLibraryFilters);
+  const [activeFilters, setActiveFilters] = useState<LibraryFilterState>(emptyLibraryFilters);
   const keywordOptions = uniqueStrings(finalItems.map(item => item.keyword).filter(Boolean));
   const articleTypeOptions = uniqueStrings(finalItems.map(item => item.type).filter(Boolean));
-  const filteredItems = filterArticleItems(finalItems, briefById, activeFilters);
+  const filteredItems = filterLibraryItems(finalItems, briefById, activeFilters);
   const selectedArticleItems = filteredItems.filter(item => selectedArticles.has(item.id));
   const allSelected = filteredItems.length > 0 && selectedArticleItems.length === filteredItems.length;
 
   useEffect(() => {
-    setDraftFilters(emptyBriefFilters);
-    setActiveFilters(emptyBriefFilters);
+    setDraftFilters(emptyLibraryFilters);
+    setActiveFilters(emptyLibraryFilters);
     setSelectedArticles(new Set());
   }, [project.id, setSelectedArticles]);
 
@@ -3243,15 +3427,15 @@ function LibraryView({ project, data, selectedArticles, setSelectedArticles, ope
 
   function applyFilters() {
     const nextFilters = { ...draftFilters };
-    const nextItems = filterArticleItems(finalItems, briefById, nextFilters);
+    const nextItems = filterLibraryItems(finalItems, briefById, nextFilters);
     const nextVisibleIds = new Set(nextItems.map(item => item.id));
     setActiveFilters(nextFilters);
     setSelectedArticles(current => new Set([...current].filter(id => nextVisibleIds.has(id))));
   }
 
   function resetFilters() {
-    setDraftFilters(emptyBriefFilters);
-    setActiveFilters(emptyBriefFilters);
+    setDraftFilters(emptyLibraryFilters);
+    setActiveFilters(emptyLibraryFilters);
   }
 
   return (
@@ -3274,12 +3458,8 @@ function LibraryView({ project, data, selectedArticles, setSelectedArticles, ope
               </select>
             </label>
             <label className="field-block">
-              <span>Brief 是否修改</span>
-              <select value={draftFilters.briefModified} onChange={event => setDraftFilters(current => ({ ...current, briefModified: event.target.value as BriefModifiedFilter }))}>
-                <option value="all">全部</option>
-                <option value="modified">已修改</option>
-                <option value="unmodified">未修改</option>
-              </select>
+              <span>定稿时间</span>
+              <input type="date" value={draftFilters.archiveDate} onChange={event => setDraftFilters(current => ({ ...current, archiveDate: event.target.value }))} />
             </label>
             <label className="field-block">
               <span>正文是否审核</span>
@@ -3326,9 +3506,10 @@ function LibraryView({ project, data, selectedArticles, setSelectedArticles, ope
                       <ItemStatusChip status={item.status} className="state-chip" />
                     </div>
                   </div>
-                  <TimeStampChip label="定稿时间" value={timestampLabel(item.articleAuditedAt)} />
+                  <TimeStampChip label="定稿时间" value={timestampLabel(finalArticleArchivedAt(item))} />
                   <AuditStatusBlock item={item} />
                   <div className="row-actions">
+                    <button className="btn danger" onClick={() => deleteArticle(item)}><Trash2 size={15} />删除</button>
                     <button className="btn" onClick={() => openDetail(item)}><BookOpen size={15} />查阅</button>
                   </div>
                 </div>
@@ -3409,7 +3590,9 @@ function PlanRow({
   onCopy,
   onEdit,
   onDelete,
-  editDisabled = false
+  editDisabled = false,
+  selectionDisabled = false,
+  warning = ""
 }: {
   item: ContentItem;
   selected: boolean;
@@ -3422,16 +3605,19 @@ function PlanRow({
   onEdit?: () => void;
   onDelete?: () => void;
   editDisabled?: boolean;
+  selectionDisabled?: boolean;
+  warning?: string;
 }) {
   return (
     <article className={`plan-row ${planReviewCardClass(brief, article)} ${selected ? "selected" : ""}`}>
-      {!readOnly && <input type="checkbox" checked={selected} onChange={onToggle} />}
+      {!readOnly && <input type="checkbox" checked={selected} disabled={selectionDisabled} onChange={onToggle} title={selectionDisabled ? "请先编辑修正关键词" : ""} />}
       <div>
         <h3>{item.type}｜{item.title}</h3>
         <p>{item.role}</p>
         <div className="chips meta-chips plan-meta-chips">
           <Chip text={item.keyword} type="brand" className="keyword-chip" />
           <Chip text={item.channel} className="channel-chip" />
+          {warning && <Chip text={warning} type="warn" />}
           {readOnly ? <Chip text="仅查看" /> : <PlanBriefStatusChip status={brief?.status} />}
         </div>
       </div>
@@ -3799,9 +3985,9 @@ function deriveProjectData(project: Project): DerivedData {
   const demandMatrixIntentGroups = normalizeMatrixIntentGroups(project.steps.demand_matrix?.output || {}, demandMatrixPlans);
   const matrixKeywordOptions = extractMatrixKeywordOptions(project.steps.matrix.output);
   const breakthroughPlans = canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.breakthrough.output, "breakthrough"), allowedKeywords).filter(item => isCoreArticleType(item.type));
-  const customPlans = canonicalizeItemsForAllowedKeywords(normalizeItems({ items: project.custom_sources || [] }, "custom"), allowedKeywords);
+  const customPlans = normalizeItems({ items: project.custom_sources || [] }, "custom");
   const briefs = sortBriefsNewestFirst(canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.brief.output, "brief"), allowedKeywords));
-  const articles = sortArticlesNewestFirst(canonicalizeItemsForAllowedKeywords(normalizeItems(project.steps.article.output, "article"), allowedKeywords));
+  const articles = sortArticlesNewestFirst(normalizeArticleKeywordsForAllowedKeywords(normalizeItems(project.steps.article.output, "article"), allowedKeywords));
   const briefById = new Map(briefs.map(item => [item.id, item]));
   return {
     intakeRows: normalizeIntake(project.steps.intake.output),
@@ -3823,7 +4009,9 @@ function deriveProjectData(project: Project): DerivedData {
 function deriveDashboardData(project: Project, data: DerivedData, publishingUsage: PublishingUsageSummary | null): DashboardData {
   const briefBySource = new Map(data.briefs.map(item => [item.sourceId, item]));
   const briefById = new Map(data.briefs.map(item => [item.id, item]));
-  const articlesByBriefId = new Map(data.articles.map(item => [item.briefId || item.id, item]));
+  const importedArticles = data.articles.filter(articleIsImportedMarkdown);
+  const writingArticles = data.articles.filter(article => !articleIsImportedMarkdown(article));
+  const articlesByBriefId = new Map(writingArticles.map(item => [item.briefId || item.id, item]));
   const allContentItems = [...data.plans, ...data.briefs, ...data.articles];
   const allowedKeywords = projectAllowedKeywords(project);
   const keywords = allowedKeywords.length ? allowedKeywords : uniqueStrings([
@@ -3831,10 +4019,12 @@ function deriveDashboardData(project: Project, data: DerivedData, publishingUsag
     ...allContentItems.map(item => item.keyword)
   ]).filter(keyword => keyword && keyword !== "未标注关键词");
   const articleTypes = orderedArticleTypes(allContentItems, true, false);
+  const writingTotal = data.plans.length;
+  const deliveryTotal = writingTotal + importedArticles.length;
   const articleFinalCount = data.articles.filter(article => articleIsFinal(article, briefById)).length;
   const articleUsedCount = data.articles.filter(article => articlePublishedCount(article, publishingUsage) > 0 || itemIsUsed(article)).length;
   const articlePurchasingCount = data.articles.filter(article => articlePurchasingCountFor(article, publishingUsage) > 0).length;
-  const staleArticles = data.articles.filter(article => !articleIsFinal(article, briefById)).length;
+  const staleArticles = writingArticles.filter(article => !articleIsFinal(article, briefById)).length;
   const pendingBriefs = data.plans.filter(plan => !briefIsGenerated(briefBySource.get(plan.sourceId))).length;
   const pendingArticles = data.briefs.filter(brief => {
     const article = articlesByBriefId.get(brief.id);
@@ -3879,6 +4069,9 @@ function deriveDashboardData(project: Project, data: DerivedData, publishingUsag
       plans: data.plans.length,
       briefs: data.briefs.length,
       articles: data.articles.length,
+      writingTotal,
+      writingArticles: writingArticles.length,
+      deliveryTotal,
       completed: articleFinalCount,
       used: articleUsedCount,
       purchasing: articlePurchasingCount,
@@ -3936,6 +4129,10 @@ function filterAllowedKeywords(keywords: string[], allowedKeywords: string[]): s
   return uniqueStrings(keywords.map(keyword => normalizeKeywordToAllowed(keyword, allowedKeywords)).filter(keyword => allowedSet.has(keyword)));
 }
 
+function customKeywordIsValid(item: ContentItem, allowedKeywords: string[]): boolean {
+  return allowedKeywords.length > 0 && allowedKeywords.includes(item.keyword);
+}
+
 function canonicalizeItemsForAllowedKeywords(items: ContentItem[], allowedKeywords: string[]): ContentItem[] {
   if (!allowedKeywords.length) return items;
   const allowedSet = new Set(allowedKeywords);
@@ -3943,6 +4140,16 @@ function canonicalizeItemsForAllowedKeywords(items: ContentItem[], allowedKeywor
     const keyword = normalizeKeywordToAllowed(item.keyword, allowedKeywords);
     if (!allowedSet.has(keyword)) return [];
     return [{ ...item, keyword }];
+  });
+}
+
+function normalizeArticleKeywordsForAllowedKeywords(items: ContentItem[], allowedKeywords: string[]): ContentItem[] {
+  if (!allowedKeywords.length) return items;
+  const allowedSet = new Set(allowedKeywords);
+  return items.map(item => {
+    const keyword = normalizeKeywordToAllowed(item.keyword, allowedKeywords);
+    if (!allowedSet.has(keyword)) return item;
+    return { ...item, keyword };
   });
 }
 
@@ -4203,6 +4410,13 @@ function importedArticleImportedAt(article: ContentItem): string {
     if (importedAt) return importedAt;
   }
   return article.articleAuditedAt || readString(article.raw, ["article_audited_at", "articleAuditedAt"], "");
+}
+
+function finalArticleArchivedAt(article: ContentItem): string {
+  return article.articleAuditedAt
+    || readString(article.raw, ["article_audited_at", "articleAuditedAt"], "")
+    || (articleIsImportedMarkdown(article) ? importedArticleImportedAt(article) : "")
+    || itemGeneratedAtValue(article);
 }
 
 function itemIsUsed(item: ContentItem): boolean {
@@ -4474,6 +4688,21 @@ function timestampLabel(rawValue?: string): string {
   }).format(new Date(parsed));
 }
 
+function dateInputValue(rawValue?: string): string {
+  if (!rawValue) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) return rawValue;
+  const parsed = Date.parse(rawValue);
+  if (Number.isFinite(parsed)) {
+    const date = new Date(parsed);
+    const year = date.getFullYear();
+    const month = `${date.getMonth() + 1}`.padStart(2, "0");
+    const day = `${date.getDate()}`.padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  const dateMatch = rawValue.match(/^(\d{4}-\d{2}-\d{2})/);
+  return dateMatch?.[1] || "";
+}
+
 function filterBriefItems(
   items: ContentItem[],
   articleByBriefId: Map<string, ContentItem>,
@@ -4488,6 +4717,23 @@ function filterBriefItems(
       if (filters.briefModified === "unmodified" && modified) return false;
     }
     if (filters.articleStatus !== "all" && briefArticleFilterStatus(articleByBriefId.get(item.id), item) !== filters.articleStatus) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function filterLibraryItems(
+  items: ContentItem[],
+  briefById: Map<string, ContentItem>,
+  filters: LibraryFilterState
+): ContentItem[] {
+  return items.filter(item => {
+    const brief = briefById.get(item.briefId || "");
+    if (filters.keyword !== "all" && item.keyword !== filters.keyword) return false;
+    if (filters.articleType !== "all" && item.type !== filters.articleType) return false;
+    if (filters.archiveDate && dateInputValue(finalArticleArchivedAt(item)) !== filters.archiveDate) return false;
+    if (!articleMatchesFilterStatus(item, brief, filters.articleStatus)) {
       return false;
     }
     return true;

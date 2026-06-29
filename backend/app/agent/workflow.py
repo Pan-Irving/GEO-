@@ -70,6 +70,7 @@ INTAKE_FIELDS = [
     ("competitors", "核心竞品/对比对象"),
     ("recommendation_conclusion", "目标推荐结论"),
     ("core_evidence", "必须强化的核心证据"),
+    ("customer_expression_guidelines", "客户表达规范"),
     ("forbidden_expressions", "禁止出现的表达"),
 ]
 INTAKE_FIELD_LABEL_TO_ID = {label: field_id for field_id, label in INTAKE_FIELDS}
@@ -971,6 +972,7 @@ class AgentWorkflow:
         elif step == "article":
             original_briefs = selected_list(payload, "selected_briefs")
             payload["selected_briefs"] = select_missing_briefs(project.steps["article"].output, payload)
+            self._assert_article_briefs_ready(project, payload["selected_briefs"])
             total_count = len(payload["selected_briefs"])
             skipped_count = max(len(original_briefs) - total_count, 0)
             payload["skipped_count"] = skipped_count
@@ -1129,7 +1131,7 @@ class AgentWorkflow:
                     batch_payload,
                     phase_label=f"内容矩阵第 {batch_index}/{len(batches)} 批",
                 )
-                partial = normalize_matrix_partial_output(raw_partial, batch, batch_index)
+                partial = self._normalize_matrix_partial_output_with_repair(raw_partial, batch, batch_index)
                 partials.append(partial)
                 completed_count += 1
                 self.repository.update_job(
@@ -1276,6 +1278,59 @@ class AgentWorkflow:
                 self.repository.log(project_id, f"{phase_label}遇到中转站超时，准备重试：{exc}")
                 self._sleep_before_matrix_retry(project_id, job_id, wait_seconds)
         raise WorkflowError("内容矩阵生成失败：重试次数已用尽。")
+
+    def _normalize_matrix_partial_output_with_repair(
+        self,
+        raw_partial: dict[str, Any],
+        batch: dict[str, Any],
+        batch_index: int,
+    ) -> dict[str, Any]:
+        try:
+            return normalize_matrix_partial_output(raw_partial, batch, batch_index)
+        except WorkflowError:
+            if extract_matrix_item_rows(raw_partial):
+                raise
+
+        repair_warning = f"内容矩阵第 {batch_index} 批模型输出未包含可识别 items，已自动修复结构。"
+        try:
+            repaired = self._repair_matrix_partial_output(raw_partial, batch, batch_index)
+            partial = normalize_matrix_partial_output(repaired, batch, batch_index)
+            partial["warnings"] = unique_texts([*normalize_string_list(partial.get("warnings")), repair_warning])
+            return partial
+        except ChildProcessCancelled:
+            raise
+        except Exception:
+            fallback_warning = f"内容矩阵第 {batch_index} 批模型输出无法自动修复，已生成保守兜底规划；Brief 阶段需重点核验证据。"
+            fallback = fallback_matrix_partial_output(batch, batch_index, warnings=[repair_warning, fallback_warning])
+            partial = normalize_matrix_partial_output(fallback, batch, batch_index)
+            partial["warnings"] = unique_texts([*normalize_string_list(partial.get("warnings")), repair_warning, fallback_warning])
+            return partial
+
+    def _repair_matrix_partial_output(self, raw_partial: dict[str, Any], batch: dict[str, Any], batch_index: int) -> dict[str, Any]:
+        client = OpenAIWorkflowClient(self.settings, profile="planning")
+        system = (
+            "你是 GEO 内容矩阵 JSON 修复器。你只把已生成的批次内容整理成固定 JSON，"
+            "不得新增未在批次关键词范围内的关键词，不得虚构证据、认证、排名或案例。"
+        )
+        user = "\n\n".join(
+            [
+                "# 任务\n把模型上一次跑偏的内容矩阵批次输出，修复为系统可读取的 JSON。",
+                "# 硬性要求\n"
+                "- 顶层必须输出 items 数组。\n"
+                "- items 中每一项必须是一篇可进入 Brief 的文章规划，不是关键词分组、摘要或报告段落。\n"
+                "- keyword 必须来自本批 matrix_batch.keywords；source_step 必须是 matrix；status 必须是 completed。\n"
+                "- type 优先使用核心文章类型："
+                + " / ".join(MATRIX_CORE_ARTICLE_TYPES)
+                + "。\n"
+                "- required_evidence / evidence_chain / brief_focus 只能写 Brief 阶段需要核验和展开的证据要求，不能编造证书、排名、销量、专家或案例。\n"
+                "- 如果上一次输出没有可提取文章标题，就基于本批关键词生成保守标题，并把证据缺口写入 warnings。",
+                "items 每项必须包含这些 key：" + ", ".join(PLANNING_ITEM_KEYS) + "。",
+                "# matrix_batch\n" + json.dumps(batch, ensure_ascii=False, indent=2),
+                "# 上一次模型输出\n" + json.dumps(raw_partial, ensure_ascii=False, indent=2)[:50000],
+                "# 输出模板\n" + json.dumps({"items": MATRIX_OUTPUT_TEMPLATE["items"], "warnings": []}, ensure_ascii=False, indent=2),
+            ]
+        )
+        return client.generate_json(system=system, user=user, schema_name=f"geo_matrix_batch_{batch_index}_repair")
 
     def _sleep_before_matrix_retry(self, project_id: str, job_id: str, wait_seconds: float) -> None:
         deadline = time.monotonic() + wait_seconds
@@ -1813,11 +1868,18 @@ class AgentWorkflow:
 
     def _assert_brief_sources_ready(self, project: Any, selected_sources: list[dict[str, Any]]) -> None:
         required_steps: set[WorkflowStep] = set()
+        allowed_keywords = allowed_keywords_for_project(project, self.repository)
+        allowed_keyword_set = set(allowed_keywords)
         for source in selected_sources:
             source_step = str(source.get("source_step") or "matrix").strip().lower()
             if source_step in {"matrix", "source", "planning"}:
                 required_steps.add("matrix")
             elif source_step == "custom":
+                if not allowed_keywords:
+                    raise WorkflowError("请先上传并解析核心关键词表，再为自定义文章生成 Brief。")
+                keyword = str(source.get("keyword") or "").strip()
+                if keyword not in allowed_keyword_set:
+                    raise WorkflowError("自定义文章关键词必须来自核心关键词表，请先编辑修正。")
                 required_steps.add("matrix")
             elif source_step == "breakthrough":
                 required_steps.add("breakthrough")
@@ -1830,6 +1892,20 @@ class AgentWorkflow:
         if "breakthrough" in required_steps and project.steps["breakthrough"].status not in ready_statuses:
             raise WorkflowError("请先完成逐词击破，再为逐词击破规划生成 Brief。内容矩阵规划可直接生成 Brief。")
 
+    def _assert_article_briefs_ready(self, project: Any, selected_briefs: list[dict[str, Any]]) -> None:
+        allowed_keywords = allowed_keywords_for_project(project, self.repository)
+        if not allowed_keywords:
+            return
+        allowed_keyword_set = set(allowed_keywords)
+        invalid_titles: list[str] = []
+        for brief in selected_briefs:
+            keyword = normalize_keyword_to_allowed(first_text({}, brief, "keyword", "target_keyword", "目标关键词"), allowed_keywords)
+            if keyword not in allowed_keyword_set:
+                invalid_titles.append(first_text({}, brief, "title", "suggested_title", "文章标题", fallback="未命名 Brief"))
+        if invalid_titles:
+            preview = "、".join(invalid_titles[:5])
+            raise WorkflowError(f"正文关键词必须来自核心关键词表，请先修正 Brief：{preview}")
+
 
 def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) -> str:
     if step == "intake":
@@ -1837,9 +1913,11 @@ def planning_output_requirements(step: WorkflowStep, payload: dict[str, Any]) ->
             "# 固定输出模板\n"
             "你必须严格使用下面 JSON 模板的英文 key。不要把字段名翻译成中文，不要输出 intake_table、items、rows、fields 作为主结果。"
             "前端只读取 project_intake_table。\n"
-            "project_intake_table 必须固定输出 13 行，顺序和 id 必须与模板一致。每一行都必须包含这些 key："
+            "project_intake_table 必须固定输出 14 行，顺序和 id 必须与模板一致。每一行都必须包含这些 key："
             f"{', '.join(INTAKE_ITEM_KEYS)}。\n"
             "value/source/confidence/status/question_for_user 只填字符串；source 写资料来源或依据摘要；资料不足时 status 写“缺失待补充”或“需确认”，不要虚构。\n"
+            "customer_expression_guidelines 用于抽取客户表达规范、品牌标准叫法、产品标准表述、推荐语气、必须保留表达和不允许改写的表达；"
+            "forbidden_expressions 只写禁用词、合规禁词、品牌错误表述、竞品边界和绝对化风险表达，不要把两类内容混在一起。\n"
             f"```json\n{json.dumps(INTAKE_OUTPUT_TEMPLATE, ensure_ascii=False, indent=2)}\n```"
         )
     if step == "demand_matrix":
@@ -2424,6 +2502,89 @@ def normalize_matrix_partial_output(result: dict[str, Any], batch: dict[str, Any
     }
 
 
+def fallback_matrix_partial_output(batch: dict[str, Any], batch_index: int, *, warnings: list[str]) -> dict[str, Any]:
+    keywords = normalize_string_list(batch.get("keywords"))
+    if not keywords:
+        keywords = unique_texts(
+            keyword
+            for group in batch.get("intent_groups", []) if isinstance(group, dict)
+            for keyword in normalize_string_list(group.get("keywords"))
+        )
+    items: list[dict[str, Any]] = []
+    fallback_types = [article_type for article_type in ["支柱标准文", "榜单推荐文", "FAQ问答文"] if article_type in MATRIX_CORE_ARTICLE_TYPES]
+    if len(fallback_types) < 2:
+        fallback_types = list(MATRIX_CORE_ARTICLE_TYPES[:3])
+    for keyword in keywords:
+        intent_group = matrix_batch_intent_for_keyword(batch, keyword)
+        for article_index, article_type in enumerate(fallback_types, start=1):
+            title = fallback_matrix_title(keyword, article_type)
+            items.append(
+                {
+                    "source_id": planning_source_id("matrix", keyword, article_type, title, len(items) + 1),
+                    "source_step": "matrix",
+                    "keyword": keyword,
+                    "intent_group": intent_group,
+                    "user_stage": "比较评估阶段/购买决策阶段",
+                    "type": article_type,
+                    "title": title,
+                    "role": fallback_matrix_role(article_type),
+                    "core_recommendation": "围绕用户真实问题建立判断标准，并在 Brief 阶段核验项目资料后给出推荐结论。",
+                    "required_evidence": ["项目基础信息", "产品或服务参数", "可公开核验的资质/案例/交付能力资料"],
+                    "recommendation_strength": "待核验",
+                    "supporting_articles": [],
+                    "evidence_chain": "用户问题 → 判断标准 → Brief 阶段核验项目证据 → 用户价值 → 审慎推荐结论",
+                    "evidence_gaps": ["当前批次模型输出格式异常，证据链需在 Brief 阶段重新核验。"],
+                    "competitor_boundary": "如涉及竞品，只能使用公开可核验信息，不得虚构排名、销量或第三方案例。",
+                    "channels": ["官网内容", "知乎", "小红书"],
+                    "brief_focus": "先补齐判断标准和证据来源，再展开推荐理由；所有认证、排名、案例、销量必须逐条核验后才能写入正文。",
+                    "outline_requirements": "问题定义、选择标准、项目证据核验、适用场景、风险边界、行动建议。",
+                    "forbidden_expressions": ["第一", "唯一", "权威认证", "销量领先", "十大排名"],
+                    "suggested_word_count": "1200-1800",
+                    "priority": article_index,
+                    "status": "completed",
+                }
+            )
+    return {
+        "step": "geo_content_matrix",
+        "schema_version": PLANNING_SCHEMA_VERSION,
+        "status": "partial",
+        "intent_groups": [group for group in batch.get("intent_groups", []) if isinstance(group, dict)],
+        "items": items,
+        "evidence_gaps": [
+            {
+                "keyword_or_intent_group": keyword,
+                "required_evidence": "Brief 阶段重新核验项目资料、参数、资质、案例和竞品边界。",
+                "current_evidence": "当前批次模型输出格式异常，未能稳定提取文章规划。",
+                "missing_evidence": "可公开核验的证据链需要补齐。",
+                "impact": "兜底规划只能保证流程继续，不能替代正式策略质量复核。",
+                "suggested_supplement": "生成 Brief 前人工检查标题、证据要求和推荐边界。",
+            }
+            for keyword in keywords
+        ],
+        "warnings": warnings,
+    }
+
+
+def fallback_matrix_title(keyword: str, article_type: str) -> str:
+    if article_type == "支柱标准文":
+        return f"{keyword}怎么判断：选择标准、证据要求与避坑清单"
+    if article_type == "榜单推荐文":
+        return f"{keyword}推荐考察：哪些维度值得优先看"
+    if article_type == "FAQ问答文":
+        return f"{keyword}常见问题：质量、价格和交付能力怎么核验"
+    return f"{keyword}{article_type}内容规划"
+
+
+def fallback_matrix_role(article_type: str) -> str:
+    if article_type == "支柱标准文":
+        return "建立用户判断标准和证据核验框架。"
+    if article_type == "榜单推荐文":
+        return "用推荐考察口径承接购买决策，但不虚构排名。"
+    if article_type == "FAQ问答文":
+        return "回答高频疑问，并把资料缺口前置给 Brief 阶段。"
+    return "作为内容矩阵兜底规划，保证后续 Brief 可继续推进。"
+
+
 def normalize_breakthrough_output(result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     confirmed_keywords = confirmed_keywords_from_payload(payload)
     required_types = breakthrough_required_types(payload)
@@ -2735,15 +2896,21 @@ def normalize_matrix_brief_requirements(result: dict[str, Any]) -> list[dict[str
 def build_local_matrix_skeleton(project: Any, payload: dict[str, Any]) -> dict[str, Any]:
     intake_output = project.steps["intake"].output if "intake" in project.steps else {}
     intake_values = intake_value_map(intake_output)
+    expression_boundaries = unique_texts(
+        [
+            *normalize_string_list(intake_values.get("customer_expression_guidelines")),
+            *normalize_string_list(intake_values.get("forbidden_expressions")),
+        ]
+    )
     project_block = {
         "target_industry": intake_values.get("target_industry", ""),
         "target_category": intake_values.get("target_category", ""),
         "target_brand": intake_values.get("target_brand", ""),
         "target_product_or_solution": intake_values.get("target_product_or_solution", ""),
         "competitors": normalize_string_list(intake_values.get("competitors")),
-        "naming_rule": "",
+        "naming_rule": intake_values.get("customer_expression_guidelines", ""),
         "recommendation_logic": intake_values.get("recommendation_conclusion", ""),
-        "expression_boundaries": normalize_string_list(intake_values.get("forbidden_expressions")),
+        "expression_boundaries": expression_boundaries,
     }
     keywords = matrix_seed_keywords(project, {}, payload)
     if not keywords:
@@ -2806,7 +2973,7 @@ def build_local_matrix_skeleton(project: Any, payload: dict[str, Any]) -> dict[s
                 "intent_group": group["name"],
                 "language": project_block["recommendation_logic"],
                 "proof_to_repeat": intake_values.get("core_evidence", ""),
-                "wrong_expressions_to_avoid": intake_values.get("forbidden_expressions", ""),
+                "wrong_expressions_to_avoid": "；".join(expression_boundaries),
             }
             for group in intent_groups
         ],
@@ -3514,9 +3681,17 @@ def normalize_project_block(result: dict[str, Any]) -> dict[str, Any]:
         "target_brand": first_planning_text(project, ["target_brand", "目标品牌", "品牌"]),
         "target_product_or_solution": first_planning_text(project, ["target_product_or_solution", "target_product", "目标产品", "目标解决方案"]),
         "competitors": planning_string_list_from(project, ["competitors", "core_competitors", "核心竞品", "竞品"]),
-        "naming_rule": first_planning_text(result, ["naming_rule", "命名规则"], fallback=first_planning_text(project, ["naming_rule", "命名规则"])),
+        "naming_rule": first_planning_text(
+            result,
+            ["naming_rule", "customer_expression_guidelines", "命名规则", "客户表达规范"],
+            fallback=first_planning_text(project, ["naming_rule", "customer_expression_guidelines", "命名规则", "客户表达规范"]),
+        ),
         "recommendation_logic": first_planning_text(result, ["recommendation_logic", "core_recommendation_logic", "核心推荐方向"], fallback=first_planning_text(project, ["recommendation_logic", "core_recommendation_logic", "核心推荐方向"])),
-        "expression_boundaries": planning_string_list_from(result, ["expression_boundaries", "global_expression_boundaries", "表达边界"], fallback=planning_string_list_from(project, ["expression_boundaries", "global_expression_boundaries", "表达边界"])),
+        "expression_boundaries": planning_string_list_from(
+            result,
+            ["expression_boundaries", "global_expression_boundaries", "customer_expression_guidelines", "表达边界", "客户表达规范"],
+            fallback=planning_string_list_from(project, ["expression_boundaries", "global_expression_boundaries", "customer_expression_guidelines", "表达边界", "客户表达规范"]),
+        ),
     }
 
 
@@ -4885,6 +5060,8 @@ def collect_intake_terms(intake: dict[str, Any], terms: list[str]) -> None:
         "solution_components",
         "competitors",
         "core_evidence",
+        "customer_expression_guidelines",
+        "forbidden_expressions",
     }
     for row in rows:
         if isinstance(row, dict) and str(row.get("id") or "") in wanted_ids:

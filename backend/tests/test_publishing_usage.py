@@ -4,9 +4,22 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
-from app.api.routes import get_publishing_usage_service, get_repository, router
+from app.api.routes import get_publishing_cleanup_service, get_publishing_usage_service, get_repository, router
+from app.services.publishing_cleanup import PublishingCleanupService
 from app.services.publishing_usage import PublishingUsageError, PublishingUsageService
 from app.storage.repository import ProjectRepository
+
+
+def add_keyword_material(repository: ProjectRepository, project_id: str, *keywords: str) -> None:
+    text = "\n".join(keywords)
+    material = repository.add_material(project_id, "keywords__核心关键词.md", "text/markdown", text.encode("utf-8"))
+    material.status = "parsed"
+    material.parsed_path = "parsed/keywords__核心关键词.md"
+    material.parse_mode = "smart"
+    material.parsed_at = "2026-01-01T00:00:00+00:00"
+    repository.parsed_dir(project_id).mkdir(parents=True, exist_ok=True)
+    (repository.project_dir(project_id) / material.parsed_path).write_text(text, encoding="utf-8")
+    repository.update_material(project_id, material)
 
 
 def create_publishing_db(path: Path) -> str:
@@ -146,3 +159,52 @@ def test_usage_summary_route_returns_publishing_counts(tmp_path: Path):
     assert body["project_id"] == project.id
     assert body["totals"]["published"] == 1
     assert body["articles"][0]["article_id"] == "article-ok"
+
+
+def test_delete_article_route_removes_writing_article_and_publishing_records(tmp_path: Path):
+    repository = ProjectRepository(tmp_path / "writing")
+    project = repository.create_project("删除定稿测试")
+    add_keyword_material(repository, project.id, "关键词 A")
+    project = repository.import_markdown_articles(
+        project.id,
+        [
+            {
+                "filename": "article.md",
+                "title": "待删除正文",
+                "keyword": "关键词 A",
+                "type": "榜单推荐文",
+                "markdown": "# 待删除正文\n\n内容",
+            }
+        ],
+    )
+    article_id = project.steps["article"].output["items"][0]["id"]
+    database_url = create_publishing_db(tmp_path / "publishing.db")
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as conn:
+        insert_article(conn, article_id, project_id=project.id)
+        insert_record(conn, "record-delete", article_id, "published")
+    engine.dispose()
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_repository] = lambda: repository
+    app.dependency_overrides[get_publishing_cleanup_service] = lambda: PublishingCleanupService(database_url)
+    client = TestClient(app)
+
+    response = client.delete(f"/api/projects/{project.id}/articles/{article_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project"]["steps"]["article"]["output"]["items"] == []
+    assert body["publishing"] == {"configured": True, "deleted_records": 1, "deleted_articles": 1}
+    reloaded = repository.load_project(project.id)
+    assert reloaded.steps["article"].output["items"] == []
+
+    engine = create_engine(database_url, future=True)
+    with engine.connect() as conn:
+        article_count = conn.execute(text("SELECT COUNT(*) FROM article_snapshots WHERE article_id = :article_id"), {"article_id": article_id}).scalar_one()
+        record_count = conn.execute(text("SELECT COUNT(*) FROM publication_records WHERE article_id = :article_id"), {"article_id": article_id}).scalar_one()
+    engine.dispose()
+
+    assert article_count == 0
+    assert record_count == 0

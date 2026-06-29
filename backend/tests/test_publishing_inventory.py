@@ -8,6 +8,18 @@ from app.services.publishing_inventory import publishing_articles
 from app.storage.repository import ProjectRepository
 
 
+def add_keyword_material(repository: ProjectRepository, project_id: str, *keywords: str) -> None:
+    text = "\n".join(keywords)
+    material = repository.add_material(project_id, "keywords__核心关键词.md", "text/markdown", text.encode("utf-8"))
+    material.status = "parsed"
+    material.parsed_path = "parsed/keywords__核心关键词.md"
+    material.parse_mode = "smart"
+    material.parsed_at = "2026-01-01T00:00:00+00:00"
+    repository.parsed_dir(project_id).mkdir(parents=True, exist_ok=True)
+    (repository.project_dir(project_id) / material.parsed_path).write_text(text, encoding="utf-8")
+    repository.update_material(project_id, material)
+
+
 def test_publishing_articles_only_returns_approved_final_markdown(tmp_path: Path):
     repository = ProjectRepository(tmp_path)
     project = repository.create_project("发布测试项目")
@@ -65,6 +77,7 @@ def test_publishing_articles_only_returns_approved_final_markdown(tmp_path: Path
 def test_import_markdown_articles_creates_approved_publishable_items(tmp_path: Path):
     repository = ProjectRepository(tmp_path)
     project = repository.create_project("发布测试项目")
+    add_keyword_material(repository, project.id, "关键词 A", "关键词 B")
 
     saved = repository.import_markdown_articles(
         project.id,
@@ -88,6 +101,7 @@ def test_import_markdown_articles_creates_approved_publishable_items(tmp_path: P
 def test_import_markdown_articles_rejects_missing_required_metadata(tmp_path: Path):
     repository = ProjectRepository(tmp_path)
     project = repository.create_project("发布测试项目")
+    add_keyword_material(repository, project.id, "关键词 A")
 
     try:
         repository.import_markdown_articles(project.id, [{"filename": "a.md", "keyword": "", "type": "榜单推荐文", "markdown": "# A"}])
@@ -100,10 +114,11 @@ def test_import_markdown_articles_rejects_missing_required_metadata(tmp_path: Pa
 def test_import_markdown_articles_rejects_non_md_and_empty_file(tmp_path: Path):
     repository = ProjectRepository(tmp_path)
     project = repository.create_project("发布测试项目")
+    add_keyword_material(repository, project.id, "关键词 A")
 
     for payload, expected in [
-        ({"filename": "a.txt", "keyword": "关键词", "type": "榜单推荐文", "markdown": "# A"}, "仅支持 .md 文件"),
-        ({"filename": "a.md", "keyword": "关键词", "type": "榜单推荐文", "markdown": "   "}, "Markdown 内容不能为空"),
+        ({"filename": "a.txt", "keyword": "关键词 A", "type": "榜单推荐文", "markdown": "# A"}, "仅支持 .md 文件"),
+        ({"filename": "a.md", "keyword": "关键词 A", "type": "榜单推荐文", "markdown": "   "}, "Markdown 内容不能为空"),
     ]:
         try:
             repository.import_markdown_articles(project.id, [payload])
@@ -113,9 +128,70 @@ def test_import_markdown_articles_rejects_non_md_and_empty_file(tmp_path: Path):
             raise AssertionError(f"expected {expected} to fail")
 
 
+def test_import_markdown_articles_requires_core_keyword_table(tmp_path: Path):
+    repository = ProjectRepository(tmp_path)
+    project = repository.create_project("发布测试项目")
+
+    try:
+        repository.import_markdown_articles(project.id, [{"filename": "a.md", "keyword": "关键词 A", "type": "榜单推荐文", "markdown": "# A"}])
+    except ValueError as exc:
+        assert "核心关键词表" in str(exc)
+    else:
+        raise AssertionError("expected missing core keyword table to fail")
+
+
+def test_import_markdown_articles_rejects_keyword_outside_core_table(tmp_path: Path):
+    repository = ProjectRepository(tmp_path)
+    project = repository.create_project("发布测试项目")
+    add_keyword_material(repository, project.id, "关键词 A")
+
+    try:
+        repository.import_markdown_articles(project.id, [{"filename": "a.md", "keyword": "高端厨电", "type": "榜单推荐文", "markdown": "# A"}])
+    except ValueError as exc:
+        assert "核心关键词表" in str(exc)
+    else:
+        raise AssertionError("expected outside keyword to fail")
+
+
+def test_publishing_articles_filters_out_orphan_keywords_when_allowed_keywords_are_known(tmp_path: Path):
+    repository = ProjectRepository(tmp_path)
+    project = repository.create_project("发布测试项目")
+    repository.update_step(
+        project.id,
+        "article",
+        status="completed",
+        output={
+            "items": [
+                {
+                    "id": "article-ok",
+                    "keyword": "关键词 A",
+                    "type": "榜单推荐文",
+                    "title": "文章 A",
+                    "markdown": "# A",
+                    "status": "completed",
+                    "article_audit_status": "approved",
+                },
+                {
+                    "id": "article-orphan",
+                    "keyword": "高端厨电",
+                    "type": "榜单推荐文",
+                    "title": "孤儿文章",
+                    "markdown": "# orphan",
+                    "status": "completed",
+                    "article_audit_status": "approved",
+                },
+            ]
+        },
+    )
+
+    saved = repository.load_project(project.id)
+    assert [item["article_id"] for item in publishing_articles(saved, ["关键词 A"])] == ["article-ok"]
+
+
 def test_import_markdown_route_accepts_multiple_files_and_metadata(tmp_path: Path):
     repository = ProjectRepository(tmp_path)
     project = repository.create_project("发布测试项目")
+    add_keyword_material(repository, project.id, "关键词 A", "关键词 B")
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_repository] = lambda: repository
@@ -140,12 +216,13 @@ def test_import_markdown_route_accepts_multiple_files_and_metadata(tmp_path: Pat
 def test_import_markdown_articles_uses_h1_title_and_filename_fallback(tmp_path: Path):
     repository = ProjectRepository(tmp_path)
     project = repository.create_project("发布测试项目")
+    add_keyword_material(repository, project.id, "关键词 A")
 
     saved = repository.import_markdown_articles(
         project.id,
         [
-            {"filename": "custom-name.md", "keyword": "关键词", "type": "榜单推荐文", "markdown": "# 标题来自 H1\n\n内容"},
-            {"filename": "fallback-name.md", "keyword": "关键词", "type": "横评对比文", "markdown": "无标题正文"},
+            {"filename": "custom-name.md", "keyword": "关键词 A", "type": "榜单推荐文", "markdown": "# 标题来自 H1\n\n内容"},
+            {"filename": "fallback-name.md", "keyword": "关键词 A", "type": "横评对比文", "markdown": "无标题正文"},
         ],
     )
 

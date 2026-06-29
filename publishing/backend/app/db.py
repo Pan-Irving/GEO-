@@ -32,6 +32,8 @@ from app.security import hash_password, new_token, verify_password
 AI_PLATFORMS = ["豆包", "千问", "元宝", "DeepSeek", "Kimi", "文心"]
 SELF_MEDIA = ["什么值得买", "百家号", "搜狐号", "网易号", "头条号", "知乎"]
 WEB_CATEGORIES = ["权威媒体", "垂直媒体", "大众媒体"]
+ARTICLE_TYPES = ["榜单推荐文", "横评对比文", "支柱标准文", "场景选购文", "产品证据文", "FAQ问答文"]
+ARTICLE_TYPE_ALIASES = {"FAQ问答短文": "FAQ问答文"}
 ROLES = {"admin", "manager", "employee"}
 ORDER_STATUSES = {"purchasing", "published"}
 
@@ -316,6 +318,7 @@ class PublishingStore:
                 if not current_project_id:
                     continue
                 condition = article_snapshots.c.project_id == current_project_id
+                condition = and_(condition, article_snapshots.c.article_id.not_like("robam-%"))
                 if incoming_ids:
                     condition = and_(condition, article_snapshots.c.article_id.not_in(sorted(incoming_ids)))
                 else:
@@ -336,7 +339,7 @@ class PublishingStore:
                     "source_id": clean(article.get("source_id")),
                     "brief_id": clean(article.get("brief_id")),
                     "keyword": clean(article.get("keyword")),
-                    "article_type": clean(article.get("article_type")),
+                    "article_type": normalize_article_type(article.get("article_type")),
                     "title": clean(article.get("title")),
                     "markdown": clean(article.get("markdown")),
                     "content_hash": clean(article.get("content_hash")),
@@ -412,7 +415,7 @@ class PublishingStore:
         user_id = clean(payload.get("user_id"))
         project_id = clean(payload.get("project_id"))
         keywords = clean_list(payload.get("keywords"))
-        article_types = clean_list(payload.get("article_types"))
+        article_types = [normalize_article_type(item) for item in clean_list(payload.get("article_types"))]
         if not user_id or not project_id:
             raise ValueError("必须选择员工和项目。")
         now = utc_now()
@@ -560,8 +563,8 @@ class PublishingStore:
         media_name = clean(payload.get("media_name"))
         publish_url = clean(payload.get("publish_url"))
         ai_platforms = validate_ai_platforms(payload.get("target_ai_platforms"))
-        if media_name not in SELF_MEDIA:
-            raise ValueError("请选择有效自媒体平台。")
+        if not media_name:
+            raise ValueError("请选择或填写自媒体平台。")
         if not valid_http_url(publish_url):
             raise ValueError("请填写有效发布链接。")
         self.ensure_unique_publish_url(article["article_id"], publish_url)
@@ -606,7 +609,7 @@ class PublishingStore:
             target_ai_platforms=ai_platforms,
             reference_url=reference_url,
             publish_url="",
-            published_at="",
+            published_at=clean(payload.get("published_at")) or utc_now(),
             order_id="",
             actual_cost=0,
             order_status="purchasing",
@@ -758,24 +761,33 @@ def public_user(row: RowMapping) -> dict[str, Any]:
 
 
 def article_row(row: RowMapping) -> dict[str, Any]:
-    return dict(row)
+    data = dict(row)
+    data["article_type"] = normalize_article_type(data.get("article_type"))
+    return data
 
 
 def assignment_row(row: RowMapping) -> dict[str, Any]:
     data = dict(row)
     data["keywords"] = loads(data.pop("keywords_json", "[]"), [])
-    data["article_types"] = loads(data.pop("article_types_json", "[]"), [])
+    data["article_types"] = [normalize_article_type(item) for item in loads(data.pop("article_types_json", "[]"), [])]
     return data
 
 
 def record_row(row: RowMapping) -> dict[str, Any]:
     data = dict(row)
     data["target_ai_platforms"] = loads(data.pop("target_ai_platforms_json", "[]"), [])
+    if "article_type" in data:
+        data["article_type"] = normalize_article_type(data.get("article_type"))
     return data
 
 
 def clean(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def normalize_article_type(value: Any) -> str:
+    article_type = clean(value)
+    return ARTICLE_TYPE_ALIASES.get(article_type, article_type)
 
 
 def clean_list(value: Any) -> list[str]:

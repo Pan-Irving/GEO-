@@ -146,10 +146,20 @@ export const api = {
       body: form
     });
   },
+  deleteArticle: (projectId: string, articleId: string) =>
+    request<{ project: Project; publishing: { configured: boolean; deleted_records: number; deleted_articles: number } }>(
+      `/api/projects/${projectId}/articles/${encodeURIComponent(articleId)}`,
+      { method: "DELETE" }
+    ),
   updateItem: (projectId: string, step: WorkflowStep, itemId: string, payload: Record<string, unknown>) =>
     request<{ project: Project }>(`/api/projects/${projectId}/steps/${step}/items/${encodeURIComponent(itemId)}`, {
       method: "PATCH",
       body: JSON.stringify({ payload })
+    }),
+  deleteStepItems: (projectId: string, step: WorkflowStep, ids: string[]) =>
+    request<{ project: Project }>(`/api/projects/${projectId}/steps/${step}/items/delete`, {
+      method: "POST",
+      body: JSON.stringify({ ids })
     }),
   getLogs: (projectId: string) => request<{ logs: string }>(`/api/projects/${projectId}/logs`),
   cancelJob: (projectId: string, jobId: string) =>

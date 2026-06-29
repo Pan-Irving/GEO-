@@ -562,8 +562,74 @@ p {
   width: min(620px, 100%);
 }
 
+.custom-source-batch-modal {
+  width: min(900px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+  overflow: hidden;
+}
+
 .custom-source-modal .batch-title-area {
   min-height: 180px;
+}
+
+.custom-batch-table-wrap {
+  max-width: 100%;
+  max-height: min(52vh, 460px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.custom-batch-table.import-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.custom-batch-table th,
+.custom-batch-table td {
+  padding: 8px 10px;
+}
+
+.custom-batch-table th:nth-child(1),
+.custom-batch-table td:nth-child(1) {
+  width: 34%;
+}
+
+.custom-batch-table th:nth-child(2),
+.custom-batch-table td:nth-child(2) {
+  width: 38%;
+}
+
+.custom-batch-table th:nth-child(3),
+.custom-batch-table td:nth-child(3) {
+  width: 28%;
+}
+
+.custom-batch-table td strong {
+  max-width: none;
+}
+
+.custom-batch-table select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+@media (max-width: 760px) {
+  .custom-source-batch-modal {
+    width: calc(100vw - 24px);
+    max-width: calc(100vw - 24px);
+    padding: 14px;
+  }
+
+  .custom-batch-table.import-table {
+    min-width: 660px;
+  }
 }
 
 .content-plan-backdrop {

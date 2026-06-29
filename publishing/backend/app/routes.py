@@ -55,6 +55,7 @@ class WebPublicationRequest(BaseModel):
     publisher: str = ""
     target_ai_platforms: list[str]
     reference_url: str = ""
+    published_at: str = ""
     note: str = ""
 
 

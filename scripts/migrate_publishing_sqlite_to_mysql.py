@@ -26,6 +26,13 @@ TABLES = [
     ("assignments", assignments),
     ("publication_records", publication_records),
 ]
+DELETE_TABLES = [
+    ("publication_records", publication_records),
+    ("assignments", assignments),
+    ("sessions", sessions),
+    ("article_snapshots", article_snapshots),
+    ("users", users),
+]
 
 
 def sqlite_rows(path: Path, table_name: str) -> list[dict]:
@@ -70,11 +77,16 @@ def main() -> int:
         )
         if target_count and not seeded_admin_only and not args.force:
             raise SystemExit("Target database already has users. Re-run with --force if this is intentional.")
+        if target_count and args.force:
+            for name, table in DELETE_TABLES:
+                conn.execute(table.delete())
+                print(f"Cleared target table {name}.")
         for name, table in TABLES:
             rows = sqlite_rows(sqlite_path, name)
             if not rows:
                 continue
-            conn.execute(table.delete())
+            if not target_count or seeded_admin_only:
+                conn.execute(table.delete())
             conn.execute(table.insert(), rows)
             print(f"Imported {len(rows)} rows into {name}.")
     return 0

@@ -10,6 +10,7 @@ from app.agent.skill_loader import SkillLoader
 from app.agent.process_runner import ChildProcessCancelled
 from app.agent.workflow import AgentWorkflow, MATERIAL_PARSER_VERSION, WorkflowError, build_local_matrix_skeleton, build_matrix_batches, build_selection_prompt_blocks, client_profile_for_step, drop_running_items_after_cancel, mark_article_brief_failed, mark_article_briefs_running, mark_brief_source_failed, mark_brief_sources_running, material_summary_for_step, merge_generated_articles, merge_generated_briefs, normalize_llm_matrix_intent_groups, normalize_matrix_import_output, normalize_planning_output, parse_cache_paths, planning_output_requirements, prior_outputs_for_step, result_to_markdown
 from app.core.config import PROJECT_ROOT, Settings
+from app.models.schemas import CustomSource
 from app.services.content_plan import ContentPlanError, build_matrix_content_plan, export_content_plan_pdf
 from app.storage.repository import ProjectRepository
 
@@ -37,6 +38,7 @@ def intake_output_with_keywords(*keywords: str) -> dict[str, object]:
         {"id": "competitors", "field": "核心竞品/对比对象", "value": "竞品A、竞品B", "source": "", "confidence": "中", "status": "可直接使用", "question_for_user": ""},
         {"id": "recommendation_conclusion", "field": "目标推荐结论", "value": "优先推荐测试品牌", "source": "", "confidence": "中", "status": "可直接使用", "question_for_user": ""},
         {"id": "core_evidence", "field": "必须强化的核心证据", "value": "公开参数、品牌资料", "source": "", "confidence": "中", "status": "可直接使用", "question_for_user": ""},
+        {"id": "customer_expression_guidelines", "field": "客户表达规范", "value": "测试品牌必须写全称", "source": "", "confidence": "中", "status": "可直接使用", "question_for_user": ""},
         {"id": "forbidden_expressions", "field": "禁止出现的表达", "value": "不得虚构第一", "source": "", "confidence": "中", "status": "可直接使用", "question_for_user": ""},
     ]
     return {"step": "project_intake", "schema_version": "1.0", "status": "completed", "project_intake_table": rows}
@@ -112,6 +114,18 @@ def prepare_project_for_matrix_import(workflow: AgentWorkflow, project_id: str) 
     workflow.repository.update_material(project_id, material)
     workflow.repository.update_step(project_id, "materials", status="completed", output={"summary": "# Brief\n\nkeyword"}, confirmed=True)
     workflow.repository.update_step(project_id, "intake", status="completed", output=intake_output_with_keywords("万元预算厨电推荐"))
+
+
+def add_keyword_material(workflow: AgentWorkflow, project_id: str, *keywords: str) -> None:
+    text = "\n".join(keywords)
+    material = workflow.repository.add_material(project_id, "keywords__核心关键词.md", "text/markdown", text.encode("utf-8"))
+    material.status = "parsed"
+    material.parsed_path = "parsed/keywords__核心关键词.md"
+    material.parse_mode = "smart"
+    material.parsed_at = "2026-01-01T00:00:00+00:00"
+    workflow.repository.parsed_dir(project_id).mkdir(parents=True, exist_ok=True)
+    (workflow.repository.project_dir(project_id) / material.parsed_path).write_text(text, encoding="utf-8")
+    workflow.repository.update_material(project_id, material)
 
 
 def breakthrough_rows(keyword: str = "A", article_types: list[str] | None = None) -> list[dict[str, object]]:
@@ -551,6 +565,7 @@ def test_can_start_intake_after_materials_confirmed(tmp_path: Path):
 def test_custom_source_is_persisted_and_deduped(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "GEO 撰文工具")
     workflow.repository.update_step(
         project.id,
         "matrix",
@@ -560,7 +575,7 @@ def test_custom_source_is_persisted_and_deduped(tmp_path: Path):
 
     saved = workflow.repository.create_custom_source(
         project.id,
-        {"title": "如何选择 GEO 撰文工具"},
+        {"keyword": "GEO 撰文工具", "type": "场景选购文", "title": "如何选择 GEO 撰文工具"},
     )
 
     assert len(saved.custom_sources) == 1
@@ -573,13 +588,43 @@ def test_custom_source_is_persisted_and_deduped(tmp_path: Path):
     with pytest.raises(ValueError, match="已存在"):
         workflow.repository.create_custom_source(
             project.id,
-            {"title": "如何选择 GEO 撰文工具"},
+            {"keyword": "GEO 撰文工具", "type": "场景选购文", "title": "如何选择 GEO 撰文工具"},
         )
 
 
-def test_custom_source_copied_context_infers_keyword_and_type(tmp_path: Path):
+def test_custom_source_requires_keyword_from_core_keyword_table(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "高端厨电")
+
+    with pytest.raises(ValueError, match="请选择"):
+        workflow.repository.create_custom_source(
+            project.id,
+            {"title": "用户改写后的标题", "type": "横评对比文"},
+        )
+
+    with pytest.raises(ValueError, match="核心关键词表"):
+        workflow.repository.create_custom_source(
+            project.id,
+            {"keyword": "非固定关键词", "title": "用户改写后的标题", "type": "横评对比文"},
+        )
+
+
+def test_custom_source_requires_parsed_core_keyword_table(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+
+    with pytest.raises(ValueError, match="请先上传并解析核心关键词表"):
+        workflow.repository.create_custom_source(
+            project.id,
+            {"keyword": "高端厨电", "title": "用户改写后的标题", "type": "横评对比文"},
+        )
+
+
+def test_custom_source_copied_context_uses_explicit_keyword_and_copied_type(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "高端厨电")
     workflow.repository.update_step(
         project.id,
         "breakthrough",
@@ -589,7 +634,7 @@ def test_custom_source_copied_context_infers_keyword_and_type(tmp_path: Path):
 
     saved = workflow.repository.create_custom_source(
         project.id,
-        {"title": "用户改写后的标题", "raw": {"copied_from": {"source_id": "source-a"}}},
+        {"keyword": "高端厨电", "title": "用户改写后的标题", "raw": {"copied_from": {"source_id": "source-a"}}},
     )
 
     source = saved.custom_sources[0]
@@ -611,46 +656,58 @@ def test_custom_source_copied_context_infers_keyword_and_type(tmp_path: Path):
 def test_custom_source_infers_article_type_from_title(tmp_path: Path, title: str, article_type: str):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "高端厨电")
 
-    saved = workflow.repository.create_custom_source(project.id, {"title": title})
+    saved = workflow.repository.create_custom_source(project.id, {"keyword": "高端厨电", "title": title})
 
     assert saved.custom_sources[0].type == article_type
 
 
-def test_custom_sources_batch_create_uses_selected_type(tmp_path: Path):
+def test_custom_sources_batch_create_uses_per_row_keyword_and_type(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "关键词 A", "关键词 B")
 
     saved = workflow.repository.create_custom_sources(
         project.id,
         {
-            "titles": ["标题 A", "", "标题 B", "标题 C"],
-            "type": "榜单推荐文",
+            "items": [
+                {"title": "标题 A", "keyword": "关键词 A", "type": "榜单推荐文"},
+                {"title": "", "keyword": "关键词 A", "type": "榜单推荐文"},
+                {"title": "标题 B", "keyword": "关键词 B", "type": "FAQ问答文"},
+                {"title": "标题 C", "keyword": "关键词 A", "type": "横评对比文"},
+            ],
             "channel": "知乎",
         },
     )
 
     assert [source.title for source in saved.custom_sources] == ["标题 A", "标题 B", "标题 C"]
-    assert {source.type for source in saved.custom_sources} == {"榜单推荐文"}
+    assert [source.keyword for source in saved.custom_sources] == ["关键词 A", "关键词 B", "关键词 A"]
+    assert [source.type for source in saved.custom_sources] == ["榜单推荐文", "FAQ问答文", "横评对比文"]
     assert {source.channel for source in saved.custom_sources} == {"知乎"}
 
 
 def test_custom_sources_batch_requires_titles(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "关键词 A")
 
     with pytest.raises(ValueError, match="至少填写"):
-        workflow.repository.create_custom_sources(project.id, {"titles": ["", "  "], "type": "榜单推荐文"})
+        workflow.repository.create_custom_sources(project.id, {"items": [{"title": "", "keyword": "关键词 A", "type": "榜单推荐文"}]})
 
 
 def test_custom_sources_batch_duplicate_skips_existing_titles(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
-    workflow.repository.create_custom_source(project.id, {"title": "已有标题", "type": "支柱标准文"})
+    add_keyword_material(workflow, project.id, "关键词 A")
+    workflow.repository.create_custom_source(project.id, {"keyword": "关键词 A", "title": "已有标题", "type": "支柱标准文"})
 
     saved = workflow.repository.create_custom_sources(
         project.id,
-        {"titles": ["新标题", "已有标题"], "type": "榜单推荐文"},
+        {"items": [
+            {"title": "新标题", "keyword": "关键词 A", "type": "榜单推荐文"},
+            {"title": "已有标题", "keyword": "关键词 A", "type": "榜单推荐文"},
+        ]},
     )
 
     assert [source.title for source in saved.custom_sources] == ["已有标题", "新标题"]
@@ -660,12 +717,13 @@ def test_custom_sources_batch_duplicate_skips_existing_titles(tmp_path: Path):
 def test_custom_sources_batch_rejects_when_all_titles_exist(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
-    workflow.repository.create_custom_source(project.id, {"title": "已有标题", "type": "支柱标准文"})
+    add_keyword_material(workflow, project.id, "关键词 A")
+    workflow.repository.create_custom_source(project.id, {"keyword": "关键词 A", "title": "已有标题", "type": "支柱标准文"})
 
     with pytest.raises(ValueError, match="都已存在"):
         workflow.repository.create_custom_sources(
             project.id,
-            {"titles": ["已有标题"], "type": "榜单推荐文"},
+            {"items": [{"title": "已有标题", "keyword": "关键词 A", "type": "榜单推荐文"}]},
         )
 
     saved = workflow.repository.load_project(project.id)
@@ -675,10 +733,11 @@ def test_custom_sources_batch_rejects_when_all_titles_exist(tmp_path: Path):
 def test_custom_source_edit_before_brief_recomputes_source_id(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
-    saved = workflow.repository.create_custom_source(project.id, {"title": "旧标题"})
+    add_keyword_material(workflow, project.id, "关键词 A")
+    saved = workflow.repository.create_custom_source(project.id, {"keyword": "关键词 A", "type": "支柱标准文", "title": "旧标题"})
     old_id = saved.custom_sources[0].source_id
 
-    saved = workflow.repository.update_custom_source(project.id, old_id, {"title": "新标题"})
+    saved = workflow.repository.update_custom_source(project.id, old_id, {"keyword": "关键词 A", "type": "支柱标准文", "title": "新标题"})
 
     assert saved.custom_sources[0].title == "新标题"
     assert saved.custom_sources[0].source_id != old_id
@@ -688,9 +747,10 @@ def test_custom_source_edit_before_brief_recomputes_source_id(tmp_path: Path):
 def test_custom_sources_survive_step_updates(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "关键词 A")
     workflow.repository.create_custom_source(
         project.id,
-        {"title": "用户自定义标题"},
+        {"keyword": "关键词 A", "type": "支柱标准文", "title": "用户自定义标题"},
     )
 
     workflow.repository.update_step(project.id, "matrix", status="running", output={})
@@ -743,6 +803,25 @@ def test_generated_article_items_include_generated_at():
     assert merged["items"][0]["generated_at"] == item["generated_at"]
 
 
+def test_article_generation_rejects_brief_keyword_outside_core_keyword_table(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "关键词 A")
+    brief = {
+        "id": "brief-orphan",
+        "source_id": "source-orphan",
+        "keyword": "高端厨电",
+        "type": "榜单推荐文",
+        "title": "孤儿 Brief",
+        "markdown": "# Brief",
+        "status": "completed",
+    }
+    workflow.repository.update_step(project.id, "brief", status="completed", output={"items": [brief]})
+
+    with pytest.raises(WorkflowError, match="核心关键词表"):
+        workflow.start_step(project.id, "article", {"selected_briefs": [brief]})
+
+
 def test_running_and_failed_placeholders_do_not_include_generated_at():
     source = {"source_id": "source-a", "title": "高端厨电怎么选"}
     brief = {"id": "brief-source-a", "title": "高端厨电怎么选"}
@@ -761,6 +840,7 @@ def test_running_and_failed_placeholders_do_not_include_generated_at():
 def test_custom_source_can_start_brief_generation(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "GEO")
     for step in ["materials", "intake", "matrix", "breakthrough"]:
         workflow.repository.update_step(project.id, step, status="completed", confirmed=True)
     saved = workflow.repository.create_custom_source(
@@ -778,9 +858,25 @@ def test_custom_source_can_start_brief_generation(tmp_path: Path):
     assert selected["title"] == "用户指定标题"
 
 
+def test_custom_source_brief_generation_rejects_invalid_keyword(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "固定关键词")
+    for step in ["materials", "intake", "matrix", "breakthrough"]:
+        workflow.repository.update_step(project.id, step, status="completed", confirmed=True)
+
+    with pytest.raises(WorkflowError, match="关键词必须来自核心关键词表"):
+        workflow.start_step(
+            project.id,
+            "brief",
+            {"selected_sources": [{"source_id": "custom-a", "source_step": "custom", "keyword": "非固定关键词", "type": "FAQ问答文", "title": "用户指定标题"}]},
+        )
+
+
 def test_custom_source_edit_is_rejected_after_brief_exists(tmp_path: Path):
     workflow = make_workflow(tmp_path)
     project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "GEO")
     saved = workflow.repository.create_custom_source(
         project.id,
         {"keyword": "GEO", "type": "FAQ问答文", "title": "用户指定标题"},
@@ -799,6 +895,78 @@ def test_custom_source_edit_is_rejected_after_brief_exists(tmp_path: Path):
             source_id,
             {"title": "改标题"},
         )
+
+
+def test_legacy_invalid_custom_source_keyword_can_be_fixed_after_brief_exists(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    add_keyword_material(workflow, project.id, "GEO")
+    project = workflow.repository.load_project(project.id)
+    project.custom_sources.append(
+        CustomSource(
+            id="custom-legacy",
+            source_id="custom-legacy",
+            keyword="旧错误关键词",
+            type="FAQ问答文",
+            title="用户指定标题",
+        )
+    )
+    workflow.repository.save_project(project)
+    workflow.repository.update_step(
+        project.id,
+        "brief",
+        status="completed",
+        output={"items": [{"id": "brief-custom-legacy", "source_id": "custom-legacy", "title": "用户指定标题"}]},
+    )
+
+    saved = workflow.repository.update_custom_source(
+        project.id,
+        "custom-legacy",
+        {"keyword": "GEO", "type": "FAQ问答文", "title": "用户指定标题"},
+    )
+
+    assert saved.custom_sources[0].keyword == "GEO"
+    assert saved.custom_sources[0].source_id == "custom-legacy"
+
+
+def test_delete_briefs_removes_selected_items(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "brief",
+        status="completed",
+        output={
+            "items": [
+                {"id": "brief-a", "source_id": "source-a", "title": "Brief A"},
+                {"id": "brief-b", "source_id": "source-b", "title": "Brief B"},
+            ]
+        },
+    )
+
+    saved = workflow.repository.delete_briefs(project.id, ["brief-a"])
+
+    assert [item["id"] for item in saved.steps["brief"].output["items"]] == ["brief-b"]
+
+
+def test_delete_briefs_rejects_when_article_exists(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(
+        project.id,
+        "brief",
+        status="completed",
+        output={"items": [{"id": "brief-a", "source_id": "source-a", "title": "Brief A"}]},
+    )
+    workflow.repository.update_step(
+        project.id,
+        "article",
+        status="completed",
+        output={"items": [{"id": "article-brief-a", "brief_id": "brief-a", "title": "Article A"}]},
+    )
+
+    with pytest.raises(ValueError, match="请先在正文审核页删除关联正文"):
+        workflow.repository.delete_briefs(project.id, ["brief-a"])
 
 
 def test_brief_prompt_marks_custom_title_as_required():
@@ -923,6 +1091,77 @@ def test_matrix_batched_generation_merges_canonical_output(tmp_path: Path, monke
     assert len(output["items"]) == 12
     assert set(output) >= {"keyword_overview", "intent_groups", "article_type_pool", "items", "brief_requirements", "warnings"}
     assert [row["count"] for row in output["article_type_pool"]] == [2, 2, 2, 2, 2, 2]
+
+
+def test_matrix_batched_generation_repairs_missing_items_batch(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path, matrix_batch_keyword_size=1)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("A推荐", "B怎么选"))
+    job_id = workflow.start_step(project.id, "matrix", {})
+    monkeypatch.setattr(workflow, "_build_llm_matrix_skeleton", lambda project, skeleton, payload: skeleton)
+
+    def fake_run_step(project_id: str, step: str, payload: dict[str, object]):
+        batch = payload.get("matrix_batch")
+        assert isinstance(batch, dict)
+        keyword = str(batch["keywords"][0])
+        if keyword == "B怎么选":
+            return {"summary": "这一批输出成了说明文字", "markdown": "缺少 items"}
+        return {"items": matrix_required_rows(keyword)}
+
+    repair_calls: list[int] = []
+
+    def fake_repair(raw_partial: dict[str, object], batch: dict[str, object], batch_index: int):
+        repair_calls.append(batch_index)
+        return {"items": matrix_required_rows(str(batch["keywords"][0])), "warnings": ["已修复"]}
+
+    monkeypatch.setattr(workflow, "_run_step", fake_run_step)
+    monkeypatch.setattr(workflow, "_repair_matrix_partial_output", fake_repair)
+
+    workflow.run_step_job(project.id, job_id, "matrix", {})
+
+    saved = workflow.repository.load_project(project.id)
+    output = saved.steps["matrix"].output
+    assert saved.steps["matrix"].status == "completed"
+    assert saved.jobs[0].status == "completed"
+    assert repair_calls == [2]
+    assert len(output["items"]) == 12
+    assert any("第 2 批模型输出未包含可识别 items" in warning for warning in output["warnings"])
+
+
+def test_matrix_batched_generation_falls_back_when_repair_fails(tmp_path: Path, monkeypatch):
+    workflow = make_workflow(tmp_path, matrix_batch_keyword_size=1)
+    project = workflow.repository.create_project("测试项目")
+    workflow.repository.update_step(project.id, "materials", status="completed", confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", confirmed=True, output=intake_output_with_keywords("A推荐", "B怎么选"))
+    job_id = workflow.start_step(project.id, "matrix", {})
+    monkeypatch.setattr(workflow, "_build_llm_matrix_skeleton", lambda project, skeleton, payload: skeleton)
+
+    def fake_run_step(project_id: str, step: str, payload: dict[str, object]):
+        batch = payload.get("matrix_batch")
+        assert isinstance(batch, dict)
+        keyword = str(batch["keywords"][0])
+        if keyword == "B怎么选":
+            return {"summary": "这一批输出成了说明文字", "markdown": "缺少 items"}
+        return {"items": matrix_required_rows(keyword)}
+
+    def fail_repair(raw_partial: dict[str, object], batch: dict[str, object], batch_index: int):
+        raise WorkflowError("repair failed")
+
+    monkeypatch.setattr(workflow, "_run_step", fake_run_step)
+    monkeypatch.setattr(workflow, "_repair_matrix_partial_output", fail_repair)
+
+    workflow.run_step_job(project.id, job_id, "matrix", {})
+
+    saved = workflow.repository.load_project(project.id)
+    output = saved.steps["matrix"].output
+    fallback_items = [item for item in output["items"] if item["keyword"] == "B怎么选"]
+    assert saved.steps["matrix"].status == "completed"
+    assert saved.jobs[0].status == "completed"
+    assert len(fallback_items) >= 3
+    assert {item["type"] for item in fallback_items} >= {"支柱标准文", "榜单推荐文", "FAQ问答文"}
+    assert all(item["recommendation_strength"] == "待核验" for item in fallback_items)
+    assert any("已生成保守兜底规划" in warning for warning in output["warnings"])
 
 
 def test_matrix_batched_generation_retries_524_once(tmp_path: Path, monkeypatch):
@@ -1207,7 +1446,9 @@ def test_intake_prompt_includes_canonical_template():
     prompt = planning_output_requirements("intake", {})
 
     assert '"step": "project_intake"' in prompt
-    assert "project_intake_table 必须固定输出 13 行" in prompt
+    assert "project_intake_table 必须固定输出 14 行" in prompt
+    assert "customer_expression_guidelines" in prompt
+    assert "forbidden_expressions 只写禁用词" in prompt
     assert "id, field, value, source, confidence, status, question_for_user" in prompt
     assert "不要把字段名翻译成中文" in prompt
 
@@ -1242,6 +1483,13 @@ def test_intake_output_is_normalized_from_legacy_fields():
                     "status": "需确认",
                     "question_for_user": "是否按套系处理？",
                 },
+                {
+                    "field": "客户表达规范",
+                    "value": "老板电器不能简称老板",
+                    "source": "客户表达规范",
+                    "confidence": "高",
+                    "status": "可直接使用",
+                },
             ],
             "可直接使用的信息": ["目标品牌明确"],
         },
@@ -1250,10 +1498,11 @@ def test_intake_output_is_normalized_from_legacy_fields():
 
     assert output["step"] == "project_intake"
     assert output["schema_version"] == "1.0"
-    assert len(output["project_intake_table"]) == 13
+    assert len(output["project_intake_table"]) == 14
     industry = output["project_intake_table"][0]
     category = output["project_intake_table"][1]
     missing = output["project_intake_table"][2]
+    expression = output["project_intake_table"][12]
     assert industry == {
         "id": "target_industry",
         "field": "目标行业",
@@ -1268,7 +1517,44 @@ def test_intake_output_is_normalized_from_legacy_fields():
     assert category["question_for_user"] == "是否按套系处理？"
     assert missing["id"] == "target_keywords"
     assert missing["status"] == "缺失待补充"
+    assert expression["id"] == "customer_expression_guidelines"
+    assert expression["value"] == "老板电器不能简称老板"
     assert output["usable_info"] == ["目标品牌明确"]
+
+
+def test_local_matrix_skeleton_includes_customer_expression_guidelines(tmp_path: Path):
+    workflow = make_workflow(tmp_path)
+    project = workflow.repository.create_project("测试项目")
+    intake = normalize_planning_output(
+        "intake",
+        {
+            "project_intake_table": [
+                {"id": "target_industry", "field": "目标行业", "value": "高端厨电", "source": "", "confidence": "高", "status": "可直接使用"},
+                {"id": "target_category", "field": "目标品类", "value": "高端厨电套系", "source": "", "confidence": "高", "status": "可直接使用"},
+                {"id": "target_keywords", "field": "目标关键词", "value": "A", "source": "", "confidence": "高", "status": "可直接使用"},
+                {"id": "article_title", "field": "文章标题", "value": "", "source": "", "confidence": "低", "status": "缺失待补充"},
+                {"id": "article_types", "field": "文章类型", "value": "", "source": "", "confidence": "低", "status": "缺失待补充"},
+                {"id": "publishing_channels", "field": "发布渠道", "value": "", "source": "", "confidence": "低", "status": "缺失待补充"},
+                {"id": "target_brand", "field": "目标品牌", "value": "老板电器", "source": "", "confidence": "高", "status": "可直接使用"},
+                {"id": "target_product_or_solution", "field": "目标产品/服务/解决方案", "value": "老板 AI 数字厨电", "source": "", "confidence": "高", "status": "可直接使用"},
+                {"id": "solution_components", "field": "目标产品/服务/解决方案组成", "value": "", "source": "", "confidence": "低", "status": "缺失待补充"},
+                {"id": "competitors", "field": "核心竞品/对比对象", "value": "方太", "source": "", "confidence": "中", "status": "可直接使用"},
+                {"id": "recommendation_conclusion", "field": "目标推荐结论", "value": "优先推荐老板电器", "source": "", "confidence": "中", "status": "可直接使用"},
+                {"id": "core_evidence", "field": "必须强化的核心证据", "value": "公开参数", "source": "", "confidence": "中", "status": "可直接使用"},
+                {"id": "customer_expression_guidelines", "field": "客户表达规范", "value": "老板电器必须写全称，不能简称老板", "source": "", "confidence": "高", "status": "可直接使用"},
+                {"id": "forbidden_expressions", "field": "禁止出现的表达", "value": "第一、唯一", "source": "", "confidence": "高", "status": "可直接使用"},
+            ]
+        },
+        {},
+    )
+    workflow.repository.update_step(project.id, "materials", status="completed", output={"summary": "# ok"}, confirmed=True)
+    workflow.repository.update_step(project.id, "intake", status="completed", output=intake)
+
+    skeleton = build_local_matrix_skeleton(workflow.repository.load_project(project.id), {})
+
+    assert "老板电器必须写全称" in skeleton["project"]["naming_rule"]
+    assert "老板电器必须写全称" in skeleton["project"]["expression_boundaries"]
+    assert "第一" in skeleton["project"]["expression_boundaries"]
 
 
 def test_intake_output_without_rows_is_rejected():
@@ -1395,7 +1681,7 @@ def test_intake_job_writes_canonical_output_file(tmp_path: Path, monkeypatch):
 
     saved = workflow.repository.load_project(project.id)
     assert saved.steps["intake"].output["step"] == "project_intake"
-    assert len(saved.steps["intake"].output["project_intake_table"]) == 13
+    assert len(saved.steps["intake"].output["project_intake_table"]) == 14
     output_file = next(workflow.repository.outputs_dir(project.id).rglob("01-project-intake.md"))
     text = output_file.read_text(encoding="utf-8")
     assert '"step": "project_intake"' in text

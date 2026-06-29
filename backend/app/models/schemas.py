@@ -140,9 +140,20 @@ class CustomSourceRequest(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class CustomSourceBatchItem(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    keyword: str = Field(default="", max_length=120)
+    type: str = Field(default="", max_length=80)
+    brief_focus: str = Field(default="", max_length=1000)
+    channel: str = Field(default="", max_length=120)
+    channels: list[str] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class CustomSourceBatchRequest(BaseModel):
+    items: list[CustomSourceBatchItem] = Field(default_factory=list)
     titles: list[str] = Field(default_factory=list)
-    type: str = Field(min_length=1, max_length=80)
+    type: str = Field(default="", max_length=80)
     brief_focus: str = Field(default="", max_length=1000)
     channel: str = Field(default="", max_length=120)
     channels: list[str] = Field(default_factory=list)
@@ -155,6 +166,10 @@ class ConfirmStepRequest(BaseModel):
 
 class UpdateItemRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeleteStepItemsRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

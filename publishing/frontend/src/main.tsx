@@ -62,6 +62,11 @@ interface Options {
 
 const defaultOptions: Options = { ai_platforms: [], self_media: [], web_categories: [] };
 const AUTH_TOKEN_KEY = "publishing_token";
+const CUSTOM_SELF_MEDIA = "__custom_self_media__";
+const ARTICLE_TYPES = ["榜单推荐文", "横评对比文", "支柱标准文", "场景选购文", "产品证据文", "FAQ问答文"];
+const ARTICLE_TYPE_ALIASES: Record<string, string> = {
+  "FAQ问答短文": "FAQ问答文",
+};
 
 function migrateLegacyAuthToken() {
   if (sessionStorage.getItem(AUTH_TOKEN_KEY)) return;
@@ -500,7 +505,7 @@ function Dashboard({
           {lowCells.length ? lowCells.map(cell => (
             <div className="signal" key={`${cell.keyword}-${cell.article_type}`}>
               <strong>{cell.keyword}</strong>
-              <span>{cell.article_type} · 定稿 {cell.total} · 已使用 {cell.published} · 采购中 {cell.purchasing}</span>
+              <span>{normalizeArticleType(cell.article_type)} · 定稿 {cell.total} · 已使用 {cell.published} · 采购中 {cell.purchasing}</span>
             </div>
           )) : <div className="empty-inline">暂无低库存信号</div>}
         </div>
@@ -517,8 +522,8 @@ function MatrixTable({
   onOpenArticles: (focus: LibraryFocus) => void;
 }) {
   const keywords = unique(cells.map(cell => cell.keyword));
-  const types = unique(cells.map(cell => cell.article_type));
-  const map = new Map(cells.map(cell => [`${cell.keyword}\u0001${cell.article_type}`, cell]));
+  const types = ARTICLE_TYPES;
+  const map = new Map(cells.map(cell => [`${cell.keyword}\u0001${normalizeArticleType(cell.article_type)}`, { ...cell, article_type: normalizeArticleType(cell.article_type) }]));
   return (
     <div className="table-wrap">
       <table className="matrix">
@@ -591,7 +596,7 @@ function ArticleLibrary({
     setStatusFilter("");
   }, [focus]);
   const keywordOptions = unique(inventory.articles.map(article => article.keyword || "未标注关键词"));
-  const typeOptions = unique(inventory.articles.map(article => article.article_type || "未标注类型"));
+  const typeOptions = ARTICLE_TYPES;
   const statusOptions = unique(inventory.articles.map(article => article.inventory_status || "可使用"));
   const recordsByArticle = groupBy(inventory.records, record => record.article_id);
   const articlesById = new Set(inventory.articles.map(article => article.article_id));
@@ -603,7 +608,7 @@ function ArticleLibrary({
   const normalizedQuery = query.trim().toLowerCase();
   const filtered = inventory.articles.filter(article => {
     const articleKeyword = article.keyword || "未标注关键词";
-    const articleType = article.article_type || "未标注类型";
+    const articleType = normalizeArticleType(article.article_type || "未标注类型");
     const articleStatus = article.inventory_status || "可使用";
     const articleRecords = recordsByArticle[article.article_id] || [];
     const mediaText = articleRecords.map(record => record.media_name).join("");
@@ -675,8 +680,8 @@ function ArticleLibrary({
                 <div className="article-main">
                   <div className="article-meta">
                     <span className={`badge article-status-badge ${article.inventory_status === "可使用" ? "good" : article.inventory_status === "采购中" ? "warn" : "accent"} status-${article.inventory_status === "可使用" ? "available" : article.inventory_status === "采购中" ? "purchasing" : "used"}`}>{article.inventory_status}</span>
-                    <span className="badge article-type-badge">{article.article_type}</span>
-                    <span className="channel-inline"><RadioTower size={14} /><strong>建议渠道</strong>{suggestedChannels(article.article_type).join("、")}</span>
+                    <span className="badge article-type-badge">{normalizeArticleType(article.article_type)}</span>
+                    <span className="channel-inline"><RadioTower size={14} /><strong>建议渠道</strong>{suggestedChannels(normalizeArticleType(article.article_type)).join("、")}</span>
                     <button className="icon-btn icon-action article-download" onClick={() => downloadMarkdown(article)} title="下载 Markdown" aria-label="下载 Markdown"><Download size={15} /></button>
                   </div>
                   <button className="article-title" onClick={() => onPreview(article)}>{article.title}</button>
@@ -758,7 +763,7 @@ function Records({
   const [dateFilter, setDateFilter] = useState("");
   const [employeeFilter, setEmployeeFilter] = useState("");
   const keywordOptions = unique(records.map(record => record.keyword || "未标注关键词"));
-  const typeOptions = unique(records.map(record => record.article_type || "未标注类型"));
+  const typeOptions = ARTICLE_TYPES;
   const employeeOptions = unique(records.map(record => record.employee_name || "未标注员工"));
   const publishedCount = records.filter(record => record.order_status === "published").length;
   const purchasingCount = records.filter(record => record.order_status === "purchasing").length;
@@ -769,13 +774,13 @@ function Records({
   const normalizedQuery = query.trim().toLowerCase();
   const filtered = records.filter(record => {
     const keyword = record.keyword || "未标注关键词";
-    const articleType = record.article_type || "未标注类型";
+    const articleType = normalizeArticleType(record.article_type || "未标注类型");
     const employee = record.employee_name || "未标注员工";
     const recordDate = (record.published_at || record.created_at || "").slice(0, 10);
     const searchable = [
       record.title,
       record.keyword,
-      record.article_type,
+      normalizeArticleType(record.article_type),
       record.media_name,
       record.channel_type,
       record.employee_name,
@@ -792,7 +797,7 @@ function Records({
       && (!dateFilter || recordDate === dateFilter)
       && (!employeeFilter || employee === employeeFilter);
   });
-  const grouped = groupBy(filtered, record => `${record.keyword || "未标注关键词"}\u0001${record.article_type || "未标注类型"}`);
+  const grouped = groupBy(filtered, record => `${record.keyword || "未标注关键词"}\u0001${normalizeArticleType(record.article_type || "未标注类型")}`);
   const hasFilters = Boolean(query || keywordFilter || typeFilter || channelFilter || statusFilter || dateFilter || employeeFilter);
   return (
     <div className="records-page">
@@ -805,7 +810,7 @@ function Records({
 
       <section className={`record-filter-card ${isAdmin ? "admin-record-filter" : "user-record-filter"}`}>
         <div className="toolbar">
-          <label className="search"><Search size={15} /><input value={query} placeholder={isAdmin ? "搜索文章、关键词、媒体或链接" : "搜索我的文章、关键词、媒体或链接"} onChange={event => setQuery(event.target.value)} /></label>
+          <label className="search"><Search size={15} /><input value={query} placeholder={isAdmin ? "搜索文章、关键词、媒体、员工或链接" : "搜索我的文章、关键词、媒体或链接"} onChange={event => setQuery(event.target.value)} /></label>
           <select className="filter-select" value={keywordFilter} onChange={event => setKeywordFilter(event.target.value)}>
             <option value="">全部关键词</option>
             {keywordOptions.map(keyword => <option key={keyword} value={keyword}>{keyword}</option>)}
@@ -864,13 +869,14 @@ function Records({
                     <col className="record-col-title" />
                     <col className="record-col-channel" />
                     <col className="record-col-media" />
+                    <col className="record-col-employee" />
                     <col className="record-col-ai" />
                     <col className="record-col-status" />
                     <col className="record-col-cost" />
                     <col className="record-col-link" />
                     <col className="record-col-action" />
                   </colgroup>
-                  <thead><tr><th>日期</th><th>文章</th><th>渠道</th><th>媒体</th><th>关联AI</th><th>状态</th><th>实际成本</th><th>发布链接</th><th>操作</th></tr></thead>
+                  <thead><tr><th>日期</th><th>文章</th><th>渠道</th><th>媒体</th><th>发布人</th><th>关联AI</th><th>状态</th><th>实际成本</th><th>发布链接</th><th>操作</th></tr></thead>
                   <tbody>
                     {rows.map(record => (
                       <tr key={record.id}>
@@ -878,6 +884,7 @@ function Records({
                         <td><strong>{record.title || record.article_id}</strong></td>
                         <td>{record.channel_type || "-"}</td>
                         <td>{record.media_name || "-"}</td>
+                        <td>{record.employee_name || "未标注员工"}</td>
                         <td><AIPlatformChips platforms={record.target_ai_platforms} /></td>
                         <td><span className={`badge ${record.order_status === "published" ? "good" : "warn"}`}>{statusLabel(record.order_status)}</span></td>
                         <td>{record.actual_cost ? formatMoney(record.actual_cost) : "-"}</td>
@@ -967,7 +974,7 @@ function WorkLog({
     const searchable = [
       record.title,
       record.keyword,
-      record.article_type,
+      normalizeArticleType(record.article_type),
       record.media_name,
       record.channel_type,
       record.employee_name,
@@ -1093,7 +1100,7 @@ function WorkLog({
                   <td>{record.employee_name || "未标注员工"}</td>
                   <td><strong>{record.title || record.article_id}</strong></td>
                   <td>{record.keyword || "未标注关键词"}</td>
-                  <td>{record.article_type || "未标注类型"}</td>
+                  <td>{normalizeArticleType(record.article_type || "未标注类型")}</td>
                   <td>{record.channel_type || "-"}</td>
                   <td>{record.media_name || "-"}</td>
                   <td><span className={`badge ${record.order_status === "published" ? "good" : "warn"}`}>{statusLabel(record.order_status)}</span></td>
@@ -1162,7 +1169,7 @@ function AdminPanel({
         if (cancelled) return;
         setAssignmentOptions({
           keywords: unique(response.articles.map(article => article.keyword || "未标注关键词")),
-          articleTypes: unique(response.articles.map(article => article.article_type || "未标注类型"))
+          articleTypes: ARTICLE_TYPES
         });
       })
       .catch(error => {
@@ -1272,7 +1279,7 @@ function AdminPanel({
                 <td>{item.display_name || item.username}<small>{userById.get(item.user_id)?.active === false ? "已停用" : roleLabel(userById.get(item.user_id)?.role || "employee")}</small></td>
                 <td><strong>{syncedProjectNameById.get(item.project_id) || item.project_id}</strong><small>ID: {item.project_id}</small></td>
                 <td>{item.keywords.length ? item.keywords.join("、") : "全部"}</td>
-                <td>{item.article_types.length ? item.article_types.join("、") : "全部"}</td>
+                <td>{item.article_types.length ? item.article_types.map(normalizeArticleType).join("、") : "全部"}</td>
                 <td><button className="text-btn" onClick={() => void run(async () => { await api.deleteAssignment(item.id); await reload(); }, "分配已删除。")}>删除</button></td>
               </tr>
             ))}</tbody>
@@ -1567,16 +1574,17 @@ function UserManagementTable({
 
 function ArticleModal({ article, onClose }: { article: ArticleSnapshot; onClose: () => void }) {
   return (
-    <Modal title="文章预览" subtitle={`${article.keyword} · ${article.article_type}`} onClose={onClose}>
+    <Modal title="文章预览" subtitle={`${article.keyword} · ${normalizeArticleType(article.article_type)}`} onClose={onClose}>
       <pre className="markdown">{article.markdown}</pre>
     </Modal>
   );
 }
 
 function SelfPublicationModal({ article, options, onClose, onSubmit }: { article: ArticleSnapshot; options: Options; onClose: () => void; onSubmit: (payload: Record<string, unknown>) => Promise<void> }) {
-  const [mediaName, setMediaName] = useState(options.self_media[0] || "");
+  const [mediaName, setMediaName] = useState(options.self_media[0] || CUSTOM_SELF_MEDIA);
+  const [customMediaName, setCustomMediaName] = useState("");
   const [publishUrl, setPublishUrl] = useState("");
-  const [publishedAt, setPublishedAt] = useState(new Date().toISOString().slice(0, 10));
+  const [publishedAt, setPublishedAt] = useState(todayDateInputValue());
   const [ai, setAi] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1584,7 +1592,9 @@ function SelfPublicationModal({ article, options, onClose, onSubmit }: { article
     setError("");
     setSubmitting(true);
     try {
-      await onSubmit({ article_id: article.article_id, media_name: mediaName, target_ai_platforms: ai, publish_url: publishUrl, published_at: publishedAt });
+      const resolvedMediaName = resolveSelfMediaName(mediaName, customMediaName);
+      if (!resolvedMediaName) throw new Error("请填写自定义平台。");
+      await onSubmit({ article_id: article.article_id, media_name: resolvedMediaName, target_ai_platforms: ai, publish_url: publishUrl, published_at: publishedAt });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "保存失败。");
     } finally {
@@ -1595,7 +1605,13 @@ function SelfPublicationModal({ article, options, onClose, onSubmit }: { article
     <Modal title="选择自媒体并录入发布结果" subtitle={article.title} onClose={onClose}>
       {error && <div className="modal-error">{error}</div>}
       <SectionTitle title="选择自营账号平台" />
-      <RadioCardGrid options={options.self_media} value={mediaName} onChange={setMediaName} meta="自营" />
+      <SelfMediaPicker
+        options={options.self_media}
+        value={mediaName}
+        customValue={customMediaName}
+        onChange={setMediaName}
+        onCustomChange={setCustomMediaName}
+      />
       <SectionTitle title="关联优化 AI 平台" />
       <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
       <SectionTitle title="录入发布结果" />
@@ -1614,6 +1630,7 @@ function WebPublicationModal({ article, options, onClose, onSubmit }: { article:
   const [mediaName, setMediaName] = useState("");
   const [publisher, setPublisher] = useState("");
   const [referenceUrl, setReferenceUrl] = useState("");
+  const [publishedAt, setPublishedAt] = useState(todayDateInputValue());
   const [ai, setAi] = useState<string[]>([]);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
@@ -1622,7 +1639,7 @@ function WebPublicationModal({ article, options, onClose, onSubmit }: { article:
     setError("");
     setSubmitting(true);
     try {
-      await onSubmit({ article_id: article.article_id, media_category: mediaCategory, media_name: mediaName, publisher, reference_url: referenceUrl, target_ai_platforms: ai, note });
+      await onSubmit({ article_id: article.article_id, media_category: mediaCategory, media_name: mediaName, publisher, reference_url: referenceUrl, published_at: publishedAt, target_ai_platforms: ai, note });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "发送失败。");
     } finally {
@@ -1637,6 +1654,7 @@ function WebPublicationModal({ article, options, onClose, onSubmit }: { article:
       <FormInput label="发布渠道" value={mediaName} onChange={setMediaName} placeholder="例如：家居行业垂直媒体" />
       <FormInput label="发稿方" value={publisher} onChange={setPublisher} placeholder="例如：供应商或发稿联系人" />
       <FormInput label="参考链接" value={referenceUrl} onChange={setReferenceUrl} placeholder="https://..." />
+      <FormInput label="发布日期" type="date" value={publishedAt} onChange={setPublishedAt} />
       <SectionTitle title="关联 AI 平台" />
       <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
       <FormInput label="备注" value={note} onChange={setNote} placeholder="可选" />
@@ -1653,6 +1671,7 @@ function CompleteWebModal({ record, options, onClose, onSubmit }: { record: Publ
   const [publishUrl, setPublishUrl] = useState("");
   const [actualCost, setActualCost] = useState("0");
   const [orderId, setOrderId] = useState("");
+  const [publishedAt, setPublishedAt] = useState(dateInputValue(record.published_at || record.created_at));
   const [ai, setAi] = useState<string[]>(record.target_ai_platforms || []);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1660,7 +1679,7 @@ function CompleteWebModal({ record, options, onClose, onSubmit }: { record: Publ
     setError("");
     setSubmitting(true);
     try {
-      await onSubmit({ media_name: mediaName, publish_url: publishUrl, actual_cost: Number(actualCost), order_id: orderId, target_ai_platforms: ai, order_status: "published" });
+      await onSubmit({ media_name: mediaName, publish_url: publishUrl, actual_cost: Number(actualCost), order_id: orderId, published_at: publishedAt, target_ai_platforms: ai, order_status: "published" });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "回填失败。");
     } finally {
@@ -1674,6 +1693,7 @@ function CompleteWebModal({ record, options, onClose, onSubmit }: { record: Publ
       <FormInput label="发布链接" value={publishUrl} onChange={setPublishUrl} placeholder="https://..." />
       <FormInput label="实际成本" value={actualCost} onChange={setActualCost} placeholder="0" />
       <FormInput label="订单号" value={orderId} onChange={setOrderId} placeholder="可选" />
+      <FormInput label="发布日期" type="date" value={publishedAt} onChange={setPublishedAt} />
       <SectionTitle title="关联 AI 平台" />
       <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
       <div className="modal-actions">
@@ -1695,9 +1715,11 @@ function EditSelfPublicationModal({
   onClose: () => void;
   onSubmit: (payload: Record<string, unknown>) => Promise<void>;
 }) {
-  const [mediaName, setMediaName] = useState(record.media_name || options.self_media[0] || "");
+  const initialIsCustom = Boolean(record.media_name) && !options.self_media.includes(record.media_name);
+  const [mediaName, setMediaName] = useState(initialIsCustom ? CUSTOM_SELF_MEDIA : record.media_name || options.self_media[0] || CUSTOM_SELF_MEDIA);
+  const [customMediaName, setCustomMediaName] = useState(initialIsCustom ? record.media_name : "");
   const [publishUrl, setPublishUrl] = useState(record.publish_url || "");
-  const [publishedAt, setPublishedAt] = useState((record.published_at || record.created_at || new Date().toISOString()).slice(0, 10));
+  const [publishedAt, setPublishedAt] = useState(dateInputValue(record.published_at || record.created_at));
   const [ai, setAi] = useState<string[]>(record.target_ai_platforms || []);
   const [note, setNote] = useState(record.note || "");
   const [error, setError] = useState("");
@@ -1706,7 +1728,9 @@ function EditSelfPublicationModal({
     setError("");
     setSubmitting(true);
     try {
-      await onSubmit({ media_name: mediaName, publish_url: publishUrl, published_at: publishedAt, target_ai_platforms: ai, note });
+      const resolvedMediaName = resolveSelfMediaName(mediaName, customMediaName);
+      if (!resolvedMediaName) throw new Error("请填写自定义平台。");
+      await onSubmit({ media_name: resolvedMediaName, publish_url: publishUrl, published_at: publishedAt, target_ai_platforms: ai, note });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "修改失败。");
     } finally {
@@ -1717,7 +1741,13 @@ function EditSelfPublicationModal({
     <Modal title="修改自营发布记录" subtitle={record.title || record.article_id} onClose={onClose}>
       {error && <div className="modal-error">{error}</div>}
       <SectionTitle title="自营发布信息" />
-      <RadioCardGrid options={options.self_media} value={mediaName} onChange={setMediaName} meta="自营" />
+      <SelfMediaPicker
+        options={options.self_media}
+        value={mediaName}
+        customValue={customMediaName}
+        onChange={setMediaName}
+        onCustomChange={setCustomMediaName}
+      />
       <SectionTitle title="关联优化 AI 平台" />
       <CheckboxCardGrid options={options.ai_platforms} value={ai} onChange={setAi} />
       <FormInput label="发布链接" value={publishUrl} onChange={setPublishUrl} placeholder="https://..." required />
@@ -1746,7 +1776,7 @@ function EditWebPublicationModal({
   const [publishUrl, setPublishUrl] = useState(record.publish_url || "");
   const [actualCost, setActualCost] = useState(String(record.actual_cost || 0));
   const [orderId, setOrderId] = useState(record.order_id || "");
-  const [publishedAt, setPublishedAt] = useState((record.published_at || record.created_at || new Date().toISOString()).slice(0, 10));
+  const [publishedAt, setPublishedAt] = useState(dateInputValue(record.published_at || record.created_at));
   const [ai, setAi] = useState<string[]>(record.target_ai_platforms || []);
   const [note, setNote] = useState(record.note || "");
   const [error, setError] = useState("");
@@ -1855,16 +1885,55 @@ function SectionTitle({ title }: { title: string }) {
   return <h3 className="drawer-section-title">{title}</h3>;
 }
 
-function RadioCardGrid({ options, value, onChange, meta }: { options: string[]; value: string; onChange: (value: string) => void; meta?: string }) {
+function RadioCardGrid({
+  options,
+  value,
+  onChange,
+  meta,
+  labels = {},
+}: {
+  options: string[];
+  value: string;
+  onChange: (value: string) => void;
+  meta?: string;
+  labels?: Record<string, string>;
+}) {
   return (
     <div className="choice-grid">
       {options.map(option => (
         <label className={`choice-card ${value === option ? "selected" : ""}`} key={option}>
           <input type="radio" checked={value === option} onChange={() => onChange(option)} />
-          <span>{option}</span>
+          <span>{labels[option] || option}</span>
           {meta && <em>{meta}</em>}
         </label>
       ))}
+    </div>
+  );
+}
+
+function resolveSelfMediaName(value: string, customValue: string) {
+  return value === CUSTOM_SELF_MEDIA ? customValue.trim() : value.trim();
+}
+
+function SelfMediaPicker({
+  options,
+  value,
+  customValue,
+  onChange,
+  onCustomChange,
+}: {
+  options: string[];
+  value: string;
+  customValue: string;
+  onChange: (value: string) => void;
+  onCustomChange: (value: string) => void;
+}) {
+  return (
+    <div className="self-media-picker">
+      <RadioCardGrid options={[...options, CUSTOM_SELF_MEDIA]} value={value} onChange={onChange} meta="自营" labels={{ [CUSTOM_SELF_MEDIA]: "自定义平台" }} />
+      {value === CUSTOM_SELF_MEDIA && (
+        <FormInput label="自定义平台" value={customValue} onChange={onCustomChange} placeholder="请输入平台名称" required />
+      )}
     </div>
   );
 }
@@ -1953,6 +2022,18 @@ function shortDate(value: string): string {
   return value.replace("T", " ").slice(0, 16);
 }
 
+function todayDateInputValue(): string {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateInputValue(value?: string): string {
+  return (value || todayDateInputValue()).slice(0, 10);
+}
+
 function statusLabel(status: string): string {
   if (status === "published") return "已发布";
   if (status === "purchasing") return "采购中";
@@ -1977,12 +2058,18 @@ function formatMoney(value: number): string {
 }
 
 function suggestedChannels(articleType: string): string[] {
+  articleType = normalizeArticleType(articleType);
   if (/榜单|推荐|清单/.test(articleType)) return ["自媒体", "垂直媒体", "大众媒体"];
   if (/横评|对比|测评|评测/.test(articleType)) return ["自媒体", "权威媒体", "垂直媒体", "大众媒体"];
   if (/场景|选购|指南/.test(articleType)) return ["自媒体", "垂直媒体", "大众媒体"];
   if (/产品|证据|案例/.test(articleType)) return ["自媒体", "权威媒体", "垂直媒体"];
   if (/FAQ|问答|问题/.test(articleType)) return ["自媒体", "大众媒体"];
   return ["自媒体", "垂直媒体"];
+}
+
+function normalizeArticleType(value?: string): string {
+  const articleType = (value || "").trim();
+  return ARTICLE_TYPE_ALIASES[articleType] || articleType;
 }
 
 function splitList(value: string): string[] {

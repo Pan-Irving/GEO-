@@ -72,7 +72,7 @@ export interface CustomSource {
 
 export interface CustomSourcePayload {
   title: string;
-  keyword?: string;
+  keyword: string;
   type?: string;
   brief_focus?: string;
   channel?: string;
@@ -81,8 +81,7 @@ export interface CustomSourcePayload {
 }
 
 export interface CustomSourceBatchPayload {
-  titles: string[];
-  type: string;
+  items: CustomSourcePayload[];
   brief_focus?: string;
   channel?: string;
   channels?: string[];

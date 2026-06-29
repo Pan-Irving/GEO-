@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models.schemas import CustomSource, Job, Material, Project, STEP_ORDER, StepState, WorkflowStep
+from app.services.project_keywords import normalize_keyword_to_allowed, project_allowed_keywords
 from app.utils.files import safe_filename, slugify, today, utc_now
 
 
@@ -215,7 +216,7 @@ class ProjectRepository:
 
     def create_custom_source(self, project_id: str, payload: dict[str, Any]) -> Project:
         project = self.load_project(project_id)
-        source = normalize_custom_source(project, payload)
+        source = normalize_custom_source(project, payload, project_dir=self.project_dir(project_id))
         if any(item.source_id == source.source_id for item in project.custom_sources):
             raise ValueError("同标题的自定义文章已存在。")
         project.custom_sources.append(source)
@@ -225,15 +226,14 @@ class ProjectRepository:
 
     def create_custom_sources(self, project_id: str, payload: dict[str, Any]) -> Project:
         project = self.load_project(project_id)
-        titles = unique_custom_titles(payload.get("titles"))
-        if not titles:
+        item_payloads = custom_batch_items(payload)
+        if not item_payloads:
             raise ValueError("请至少填写一个自定义文章标题。")
         existing_ids = {source.source_id for source in project.custom_sources}
         next_sources: list[CustomSource] = []
         next_ids: set[str] = set()
-        for title in titles:
-            source_payload = {**payload, "title": title}
-            source = normalize_custom_source(project, source_payload)
+        for source_payload in item_payloads:
+            source = normalize_custom_source(project, source_payload, project_dir=self.project_dir(project_id))
             if source.source_id in existing_ids or source.source_id in next_ids:
                 continue
             next_sources.append(source)
@@ -248,8 +248,20 @@ class ProjectRepository:
     def update_custom_source(self, project_id: str, source_id: str, payload: dict[str, Any]) -> Project:
         project = self.load_project(project_id)
         target_id = slugify(source_id, fallback="custom")
-        if custom_source_has_brief(project, target_id):
-            raise ValueError("该自定义文章已生成 Brief，请在 Brief 审核页修改。")
+        target_source = next((source for source in project.custom_sources if source.source_id == target_id), None)
+        if target_source is None:
+            raise FileNotFoundError(f"Custom source not found: {source_id}")
+        preserve_existing_id = False
+        has_brief = custom_source_has_brief(project, target_id)
+        if has_brief:
+            allowed_keywords = set(project_allowed_keywords(project, self.project_dir(project_id)))
+            if target_source.keyword in allowed_keywords:
+                raise ValueError("该自定义文章已生成 Brief，请在 Brief 审核页修改。")
+            requested_title = clean_custom_text(payload.get("title")) or target_source.title
+            requested_type = clean_custom_text(payload.get("type")) or target_source.type
+            if requested_title != target_source.title or requested_type != target_source.type:
+                raise ValueError("该自定义文章已生成 Brief，请仅修正关键词，其他内容请在 Brief 审核页修改。")
+            preserve_existing_id = True
         updated: list[CustomSource] = []
         found = False
         for source in project.custom_sources:
@@ -261,7 +273,11 @@ class ProjectRepository:
                 payload,
                 created_at=source.created_at,
                 raw={**source.raw, **payload.get("raw", {})} if isinstance(payload.get("raw"), dict) else source.raw,
+                project_dir=self.project_dir(project_id),
             )
+            if preserve_existing_id:
+                next_source.id = source.id
+                next_source.source_id = source.source_id
             if any(item.source_id == next_source.source_id for item in project.custom_sources if item.source_id != target_id):
                 raise ValueError("同标题的自定义文章已存在。")
             updated.append(next_source)
@@ -288,6 +304,10 @@ class ProjectRepository:
         project = self.load_project(project_id)
         if not articles:
             raise ValueError("请至少上传一篇 Markdown 文章。")
+        allowed_keywords = project_allowed_keywords(project, self.project_dir(project_id))
+        if not allowed_keywords:
+            raise ValueError("请先上传并解析核心关键词表，再导入 Markdown 定稿。")
+        allowed_keyword_set = set(allowed_keywords)
 
         state = project.steps["article"]
         output = dict(state.output or {})
@@ -308,10 +328,12 @@ class ProjectRepository:
             markdown = normalize_import_markdown(article.get("markdown"))
             if not markdown.strip():
                 raise ValueError(f"Markdown 内容不能为空：{filename}")
-            keyword = clean_import_text(article.get("keyword"))
+            keyword = normalize_keyword_to_allowed(clean_import_text(article.get("keyword")), allowed_keywords)
             article_type = clean_import_text(article.get("type") or article.get("article_type"))
             if not keyword:
                 raise ValueError(f"请填写关键词：{filename}")
+            if keyword not in allowed_keyword_set:
+                raise ValueError(f"导入文章关键词必须来自核心关键词表：{filename}")
             if not article_type:
                 raise ValueError(f"请填写文章类型：{filename}")
 
@@ -369,6 +391,89 @@ class ProjectRepository:
 
         self.save_project(project)
         self.log(project_id, f"导入本地 Markdown 定稿：{len(imported_items)} 篇")
+        return project
+
+    def delete_article(self, project_id: str, article_id: str) -> Project:
+        project = self.load_project(project_id)
+        target_id = str(article_id or "").strip()
+        if not target_id:
+            raise FileNotFoundError("Article not found.")
+
+        state = project.steps["article"]
+        output = dict(state.output or {})
+        items = output.get("items") if isinstance(output.get("items"), list) else []
+        kept_items: list[dict[str, Any]] = []
+        deleted_title = ""
+        found = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            current_id = str(item.get("id") or item.get("article_id") or item.get("articleId") or "").strip()
+            if current_id == target_id:
+                found = True
+                deleted_title = str(item.get("title") or item.get("article_title") or target_id).strip() or target_id
+                continue
+            kept_items.append(item)
+        if not found:
+            raise FileNotFoundError(f"Article not found: {article_id}")
+
+        now = utc_now()
+        output["items"] = kept_items
+        output["status"] = "completed" if kept_items else "empty"
+        output["updated_at"] = now
+        state.output = output
+        state.status = "completed" if kept_items else "pending"
+        state.error = None
+        state.updated_at = now
+        project.steps["article"] = state
+        self.save_project(project)
+        self.log(project_id, f"删除定稿正文：{deleted_title}")
+        return project
+
+    def delete_briefs(self, project_id: str, brief_ids: list[str]) -> Project:
+        project = self.load_project(project_id)
+        requested_ids = {str(item or "").strip() for item in brief_ids if str(item or "").strip()}
+        if not requested_ids:
+            raise ValueError("请选择要删除的 Brief。")
+
+        brief_state = project.steps["brief"]
+        brief_output = dict(brief_state.output or {})
+        brief_items = output_items_from_mapping(brief_output)
+        matched_ids: set[str] = set()
+        kept_briefs: list[dict[str, Any]] = []
+        deleted_titles: list[str] = []
+
+        for item in brief_items:
+            identifiers = {str(item.get(field) or "").strip() for field in ("id", "source_id") if item.get(field)}
+            if identifiers & requested_ids:
+                matched_ids.update(identifier for identifier in identifiers if identifier)
+                deleted_titles.append(str(item.get("title") or item.get("source_id") or item.get("id") or "Brief").strip())
+                continue
+            kept_briefs.append(item)
+
+        if not deleted_titles:
+            raise FileNotFoundError("Brief not found.")
+
+        article_items = output_items_from_mapping(project.steps["article"].output if "article" in project.steps else {})
+        related_articles = [
+            item
+            for item in article_items
+            if str(item.get("brief_id") or "").strip() in matched_ids
+        ]
+        if related_articles:
+            raise ValueError("选中的 Brief 已生成正文，请先在正文审核页删除关联正文。")
+
+        now = utc_now()
+        brief_output["items"] = kept_briefs
+        brief_output["status"] = "completed" if kept_briefs else "empty"
+        brief_output["updated_at"] = now
+        brief_state.output = brief_output
+        brief_state.status = "completed" if kept_briefs else "pending"
+        brief_state.error = None
+        brief_state.updated_at = now
+        project.steps["brief"] = brief_state
+        self.save_project(project)
+        self.log(project_id, f"删除 Brief：{len(deleted_titles)} 篇")
         return project
 
     def update_step(
@@ -628,15 +733,12 @@ def normalize_custom_source(
     *,
     created_at: str | None = None,
     raw: dict[str, Any] | None = None,
+    project_dir: Path | None = None,
 ) -> CustomSource:
     title = required_custom_text(payload, "title", "标题")
     raw_payload = raw if raw is not None else payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
     copied_source = copied_custom_source(project, raw_payload)
-    keyword = (
-        clean_custom_text(payload.get("keyword"))
-        or first_custom_text(copied_source, ["keyword", "target_keyword", "main_keyword", "关键词"])
-        or infer_custom_keyword(project, title)
-    )
+    keyword = require_custom_keyword(project, payload, project_dir)
     article_type = (
         clean_custom_text(payload.get("type"))
         or first_custom_text(copied_source, ["type", "article_type", "main_article_type", "文章类型"])
@@ -676,6 +778,18 @@ def normalize_custom_source(
     )
 
 
+def require_custom_keyword(project: Project, payload: dict[str, Any], project_dir: Path | None = None) -> str:
+    allowed_keywords = project_allowed_keywords(project, project_dir)
+    if not allowed_keywords:
+        raise ValueError("请先上传并解析核心关键词表，再新增自定义文章。")
+    keyword = clean_custom_text(payload.get("keyword"))
+    if not keyword:
+        raise ValueError("请选择自定义文章对应的关键词。")
+    if keyword not in set(allowed_keywords):
+        raise ValueError("自定义文章关键词必须来自核心关键词表。")
+    return keyword
+
+
 def custom_source_id(title: str) -> str:
     return slugify(f"custom-{title}", fallback=f"custom-{uuid.uuid4().hex[:8]}")
 
@@ -699,6 +813,25 @@ def unique_custom_titles(value: Any) -> list[str]:
         titles.append(title)
         seen.add(title)
     return titles
+
+
+def custom_batch_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = payload.get("items")
+    if isinstance(items, list):
+        normalized: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
+        base = {key: value for key, value in payload.items() if key != "items"}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = clean_custom_text(item.get("title"))
+            if not title or title in seen_titles:
+                continue
+            row = {key: value for key, value in item.items() if value not in ("", [], {})}
+            normalized.append({**base, **row, "title": title})
+            seen_titles.add(title)
+        return normalized
+    return [{**payload, "title": title} for title in unique_custom_titles(payload.get("titles"))]
 
 
 def clean_custom_text(value: Any) -> str:
@@ -736,32 +869,6 @@ def copied_custom_source(project: Project, raw: dict[str, Any]) -> dict[str, Any
             if row_id == copied_id:
                 return {**row, **copied}
     return copied
-
-
-def infer_custom_keyword(project: Project, title: str) -> str:
-    normalized_title = compact_custom_text(title)
-    for keyword in known_custom_keywords(project):
-        if compact_custom_text(keyword) in normalized_title:
-            return keyword
-    return title[:40]
-
-
-def known_custom_keywords(project: Project) -> list[str]:
-    values: list[str] = []
-    keyword_keys = {"keyword", "target_keyword", "main_keyword", "main_keyword_or_cluster", "keyword_or_cluster", "confirmed_keywords", "关键词", "主攻关键词"}
-    for step in ("matrix", "breakthrough"):
-        for row in iter_custom_dicts(project.steps[step].output):
-            for key in keyword_keys:
-                value = row.get(key)
-                if isinstance(value, str) and value.strip():
-                    values.append(clean_custom_text(value))
-                elif isinstance(value, list):
-                    values.extend(clean_custom_text(item) for item in value if clean_custom_text(item))
-    deduped: list[str] = []
-    for value in values:
-        if value and value not in deduped:
-            deduped.append(value)
-    return sorted(deduped, key=len, reverse=True)
 
 
 def infer_custom_article_type(title: str) -> str:
@@ -843,3 +950,14 @@ def custom_source_has_brief(project: Project, source_id: str) -> bool:
     if not isinstance(items, list):
         return False
     return any(isinstance(item, dict) and str(item.get("source_id") or "") == source_id for item in items)
+
+
+def output_items_from_mapping(output: Any) -> list[dict[str, Any]]:
+    if not isinstance(output, dict):
+        return []
+    value = output.get("items")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(output.get("markdown"), str) and output.get("markdown"):
+        return [dict(output)]
+    return []

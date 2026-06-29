@@ -245,7 +245,7 @@ def test_employee_can_update_and_delete_own_publication_routes(tmp_path: Path):
     updated = client.patch(
         f"/api/publications/{record['id']}",
         headers=headers,
-        json={"media_name": "百家号", "publish_url": "https://example.com/new", "target_ai_platforms": ["DeepSeek"]},
+        json={"media_name": "小红书企业号", "publish_url": "https://example.com/new", "target_ai_platforms": ["DeepSeek"]},
     )
     invalid = client.patch(
         f"/api/publications/{record['id']}",
@@ -256,13 +256,62 @@ def test_employee_can_update_and_delete_own_publication_routes(tmp_path: Path):
     inventory = client.get("/api/projects/project-1/inventory", headers=headers).json()
 
     assert updated.status_code == 200
-    assert updated.json()["record"]["media_name"] == "百家号"
+    assert updated.json()["record"]["media_name"] == "小红书企业号"
     assert updated.json()["record"]["target_ai_platforms"] == ["DeepSeek"]
     assert invalid.status_code == 400
     assert invalid.json()["detail"] == "至少选择一个 AI 平台。"
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True}
     assert inventory["totals"] == {"articles": 1, "available": 1, "published": 0, "purchasing": 0}
+
+
+def test_web_publication_route_preserves_purchase_date_on_backfill(tmp_path: Path):
+    client, publishing_store = make_client(tmp_path)
+    publishing_store.upsert_articles([article_payload("article-1")])
+    employee = publishing_store.create_user({"username": "li", "password": "secret123", "display_name": "李四", "role": "employee"})
+    publishing_store.create_assignment({"user_id": employee["id"], "project_id": "project-1", "keywords": [], "article_types": []})
+    employee_headers = {"Authorization": f"Bearer {publishing_store.login('li', 'secret123')['token']}"}
+
+    created = client.post(
+        "/api/publications/web",
+        headers=employee_headers,
+        json={
+            "article_id": "article-1",
+            "media_category": "垂直媒体",
+            "media_name": "家居媒体",
+            "target_ai_platforms": ["DeepSeek"],
+            "published_at": "2026-06-23",
+        },
+    )
+
+    assert created.status_code == 200
+    record = created.json()["record"]
+    assert record["order_status"] == "purchasing"
+    assert record["published_at"] == "2026-06-23"
+
+    completed = client.patch(
+        f"/api/publications/{record['id']}",
+        headers=auth_headers(publishing_store),
+        json={
+            "media_name": "中国家电网",
+            "publish_url": "https://example.com/web-date",
+            "actual_cost": 800,
+            "target_ai_platforms": ["豆包", "DeepSeek"],
+            "order_status": "published",
+        },
+    )
+
+    assert completed.status_code == 200
+    assert completed.json()["record"]["published_at"] == "2026-06-23"
+
+    changed = client.patch(
+        f"/api/publications/{record['id']}",
+        headers=auth_headers(publishing_store),
+        json={"published_at": "2026-06-25"},
+    )
+
+    assert changed.status_code == 200
+    assert changed.json()["record"]["published_at"] == "2026-06-25"
 
 
 def test_admin_can_update_web_publication_ai_platforms_route(tmp_path: Path):
