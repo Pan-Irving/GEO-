@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS article_snapshots (
   PRIMARY KEY (article_id),
   KEY idx_article_project (project_id),
   KEY idx_article_project_active (project_id, active),
+  KEY idx_article_active_project_name (active, project_name, project_id),
+  KEY idx_article_project_active_sort (project_id, active, keyword, article_type),
   KEY idx_article_keyword_type (keyword, article_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -90,6 +92,8 @@ CREATE TABLE IF NOT EXISTS publication_records (
   PRIMARY KEY (id),
   KEY idx_publication_article (article_id),
   KEY idx_publication_employee (employee_id),
+  KEY idx_publication_article_created (article_id, created_at),
+  KEY idx_publication_employee_article_created (employee_id, article_id, created_at),
   CONSTRAINT fk_publication_records_article_id
     FOREIGN KEY (article_id) REFERENCES article_snapshots (article_id),
   CONSTRAINT fk_publication_records_employee_id

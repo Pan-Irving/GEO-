@@ -81,6 +81,8 @@ article_snapshots = Table(
     Column("active", Boolean, nullable=False, default=True),
     Index("idx_article_project", "project_id"),
     Index("idx_article_project_active", "project_id", "active"),
+    Index("idx_article_active_project_name", "active", "project_name", "project_id"),
+    Index("idx_article_project_active_sort", "project_id", "active", "keyword", "article_type"),
     Index("idx_article_keyword_type", "keyword", "article_type"),
 )
 
@@ -121,6 +123,8 @@ publication_records = Table(
     Column("updated_at", String(64), nullable=False),
     Index("idx_publication_article", "article_id"),
     Index("idx_publication_employee", "employee_id"),
+    Index("idx_publication_article_created", "article_id", "created_at"),
+    Index("idx_publication_employee_article_created", "employee_id", "article_id", "created_at"),
 )
 
 
@@ -321,17 +325,25 @@ class PublishingStore:
                 condition = and_(condition, article_snapshots.c.article_id.not_like("robam-%"))
                 if incoming_ids:
                     condition = and_(condition, article_snapshots.c.article_id.not_in(sorted(incoming_ids)))
-                else:
-                    condition = and_(condition, article_snapshots.c.active.is_(True))
-                result = conn.execute(update(article_snapshots).where(condition).values(active=False, synced_at=now))
-                deactivated += max(result.rowcount or 0, 0)
+                condition = and_(condition, article_snapshots.c.active.is_(True))
+                deactivation_ids = [
+                    row[0]
+                    for row in conn.execute(select(article_snapshots.c.article_id).where(condition)).all()
+                ]
+                if deactivation_ids:
+                    result = conn.execute(
+                        update(article_snapshots)
+                        .where(article_snapshots.c.article_id.in_(deactivation_ids))
+                        .values(active=False, synced_at=now)
+                    )
+                    deactivated += max(result.rowcount or 0, 0)
             for article in articles:
                 article_id = clean(article.get("article_id"))
                 if not article_id:
                     continue
-                exists = conn.execute(
-                    select(article_snapshots.c.article_id).where(article_snapshots.c.article_id == article_id)
-                ).first()
+                existing = conn.execute(
+                    select(article_snapshots).where(article_snapshots.c.article_id == article_id)
+                ).mappings().first()
                 values = {
                     "article_id": article_id,
                     "project_id": clean(article.get("project_id")),
@@ -348,9 +360,16 @@ class PublishingStore:
                     "synced_at": now,
                     "active": True,
                 }
-                if exists:
-                    conn.execute(update(article_snapshots).where(article_snapshots.c.article_id == article_id).values(**values))
-                    updated += 1
+                if existing:
+                    changed = {
+                        key: value
+                        for key, value in values.items()
+                        if key != "synced_at" and comparable_value(existing.get(key)) != comparable_value(value)
+                    }
+                    if changed:
+                        changed["synced_at"] = now
+                        conn.execute(update(article_snapshots).where(article_snapshots.c.article_id == article_id).values(**changed))
+                        updated += 1
                 else:
                     conn.execute(insert(article_snapshots).values(**values))
                     created += 1
@@ -783,6 +802,12 @@ def record_row(row: RowMapping) -> dict[str, Any]:
 
 def clean(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def comparable_value(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return value
 
 
 def normalize_article_type(value: Any) -> str:

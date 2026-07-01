@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 
 from app.config import Settings
 from app.db import PublishingStore
@@ -172,6 +173,27 @@ def test_sync_keeps_imported_robam_history_articles_active(tmp_path: Path):
 
     assert result["deactivated"] == 0
     assert [item["article_id"] for item in inventory["articles"]] == ["article-1", "robam-supplement-1"]
+
+
+def test_sync_skips_unchanged_article_snapshots(tmp_path: Path):
+    store = make_store(tmp_path)
+    payload = article_payload("article-1", "关键词 A", "榜单推荐文")
+    store.upsert_articles([payload], project_id="project-1")
+    writes: list[str] = []
+
+    def collect_writes(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        normalized = statement.lower()
+        if normalized.lstrip().startswith(("insert", "update", "delete")) and "article_snapshots" in normalized:
+            writes.append(statement)
+
+    event.listen(store.engine, "before_cursor_execute", collect_writes)
+    try:
+        result = store.upsert_articles([payload], project_id="project-1")
+    finally:
+        event.remove(store.engine, "before_cursor_execute", collect_writes)
+
+    assert result["updated"] == 0
+    assert writes == []
 
 
 def test_self_publication_counts_as_published_and_blocks_duplicate_url(tmp_path: Path):

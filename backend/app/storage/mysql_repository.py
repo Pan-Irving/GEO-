@@ -4,8 +4,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, create_engine, delete, func, insert, select, update
+from sqlalchemy import Table, and_, create_engine, delete, func, insert, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection
 
 from app.models.schemas import CustomSource, Job, Material, Project, STEP_ORDER, StepState
 from app.storage.mysql_schema import (
@@ -116,39 +117,23 @@ class MySQLProjectRepository(ProjectRepository):
             else:
                 conn.execute(insert(writing_projects).values(**project_values))
 
-            for table in (
-                writing_materials,
-                writing_custom_sources,
-                writing_steps,
-                writing_jobs,
-                writing_content_items,
-                writing_articles,
-            ):
-                conn.execute(delete(table).where(table.c.project_id == project.id))
-
             material_rows = [material_row(project.id, item, project.created_at, project.updated_at) for item in project.materials]
-            if material_rows:
-                conn.execute(insert(writing_materials), material_rows)
+            sync_project_rows(conn, writing_materials, project.id, material_rows, ("id",))
 
             custom_rows = [custom_source_row(project.id, item) for item in project.custom_sources]
-            if custom_rows:
-                conn.execute(insert(writing_custom_sources), custom_rows)
+            sync_project_rows(conn, writing_custom_sources, project.id, custom_rows, ("project_id", "id"))
 
             step_rows = [step_row(project.id, step, state) for step, state in project.steps.items() if step in STEP_ORDER]
-            if step_rows:
-                conn.execute(insert(writing_steps), step_rows)
+            sync_project_rows(conn, writing_steps, project.id, step_rows, ("project_id", "step"))
 
             job_rows = [job_row(project.id, job) for job in project.jobs if job.step in STEP_ORDER]
-            if job_rows:
-                conn.execute(insert(writing_jobs), job_rows)
+            sync_project_rows(conn, writing_jobs, project.id, job_rows, ("id",))
 
             content_rows = content_item_rows(project)
-            if content_rows:
-                conn.execute(insert(writing_content_items), content_rows)
+            sync_project_rows(conn, writing_content_items, project.id, content_rows, ("id",))
 
             article_rows = article_index_rows(project)
-            if article_rows:
-                conn.execute(insert(writing_articles), article_rows)
+            sync_project_rows(conn, writing_articles, project.id, article_rows, ("project_id", "article_id"))
 
         if self.write_snapshots:
             self._write_project_snapshot(data)
@@ -274,6 +259,53 @@ def material_row(project_id: str, item: Material, created_at: str, updated_at: s
         "created_at": item.parsed_at or created_at,
         "updated_at": item.parsed_at or updated_at,
     }
+
+
+def sync_project_rows(
+    conn: Connection,
+    table: Table,
+    project_id: str,
+    rows: list[dict[str, Any]],
+    key_columns: tuple[str, ...],
+) -> None:
+    """Synchronize project-scoped rows without rewriting unchanged LONGTEXT/JSON payloads."""
+    existing_rows = conn.execute(select(table).where(table.c.project_id == project_id)).mappings().all()
+    existing_by_key = {row_key(row, key_columns): dict(row) for row in existing_rows}
+    incoming_by_key = {row_key(row, key_columns): row for row in rows}
+
+    for key, existing in existing_by_key.items():
+        if key not in incoming_by_key:
+            conn.execute(delete(table).where(key_condition(table, key_columns, key)))
+            continue
+
+        incoming = incoming_by_key[key]
+        changed = {
+            column: value
+            for column, value in incoming.items()
+            if column != "updated_at" and existing_value(existing.get(column)) != existing_value(value)
+        }
+        if changed:
+            if "updated_at" in incoming:
+                changed["updated_at"] = incoming["updated_at"]
+            conn.execute(update(table).where(key_condition(table, key_columns, key)).values(**changed))
+
+    new_rows = [row for key, row in incoming_by_key.items() if key not in existing_by_key]
+    if new_rows:
+        conn.execute(insert(table), new_rows)
+
+
+def row_key(row: dict[str, Any], key_columns: tuple[str, ...]) -> tuple[Any, ...]:
+    return tuple(row[column] for column in key_columns)
+
+
+def key_condition(table: Table, key_columns: tuple[str, ...], key: tuple[Any, ...]) -> Any:
+    return and_(*(getattr(table.c, column) == value for column, value in zip(key_columns, key, strict=True)))
+
+
+def existing_value(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return value
 
 
 def mysql_material(row: dict[str, Any]) -> Material:

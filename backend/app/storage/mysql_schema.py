@@ -25,6 +25,7 @@ writing_projects = Table(
     Column("updated_at", String(64), nullable=False),
     Column("deleted_at", String(64), nullable=True),
     Index("idx_writing_projects_updated_at", "updated_at"),
+    Index("idx_writing_projects_deleted_updated", "deleted_at", "updated_at"),
 )
 
 writing_materials = Table(
@@ -49,6 +50,7 @@ writing_materials = Table(
     Column("created_at", String(64), nullable=False),
     Column("updated_at", String(64), nullable=False),
     Index("idx_writing_materials_project", "project_id"),
+    Index("idx_writing_materials_project_created", "project_id", "created_at"),
     Index("idx_writing_materials_sha256", "sha256"),
 )
 
@@ -70,6 +72,7 @@ writing_custom_sources = Table(
     Column("created_at", String(64), nullable=False),
     Column("updated_at", String(64), nullable=False),
     Index("uq_custom_project_source", "project_id", "source_id", unique=True),
+    Index("idx_custom_project_created", "project_id", "created_at"),
     Index("idx_custom_project_keyword_type", "project_id", "keyword", "article_type"),
 )
 
@@ -104,6 +107,7 @@ writing_jobs = Table(
     Column("created_at", String(64), nullable=False),
     Column("updated_at", String(64), nullable=False),
     Index("idx_writing_jobs_project", "project_id"),
+    Index("idx_writing_jobs_project_created", "project_id", "created_at"),
     Index("idx_writing_jobs_status", "project_id", "status"),
     Index("idx_writing_jobs_step", "project_id", "step"),
 )

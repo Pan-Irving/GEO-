@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS writing_projects (
   updated_at VARCHAR(64) NOT NULL,
   deleted_at VARCHAR(64) NULL,
   PRIMARY KEY (id),
-  KEY idx_writing_projects_updated_at (updated_at)
+  KEY idx_writing_projects_updated_at (updated_at),
+  KEY idx_writing_projects_deleted_updated (deleted_at, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS writing_materials (
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS writing_materials (
   updated_at VARCHAR(64) NOT NULL,
   PRIMARY KEY (id),
   KEY idx_writing_materials_project (project_id),
+  KEY idx_writing_materials_project_created (project_id, created_at),
   KEY idx_writing_materials_sha256 (sha256),
   CONSTRAINT fk_writing_materials_project
     FOREIGN KEY (project_id) REFERENCES writing_projects (id)
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS writing_custom_sources (
   updated_at VARCHAR(64) NOT NULL,
   PRIMARY KEY (project_id, id),
   UNIQUE KEY uq_custom_project_source (project_id, source_id),
+  KEY idx_custom_project_created (project_id, created_at),
   KEY idx_custom_project_keyword_type (project_id, keyword, article_type),
   CONSTRAINT fk_writing_custom_sources_project
     FOREIGN KEY (project_id) REFERENCES writing_projects (id)
@@ -93,6 +96,7 @@ CREATE TABLE IF NOT EXISTS writing_jobs (
   updated_at VARCHAR(64) NOT NULL,
   PRIMARY KEY (id),
   KEY idx_writing_jobs_project (project_id),
+  KEY idx_writing_jobs_project_created (project_id, created_at),
   KEY idx_writing_jobs_status (project_id, status),
   KEY idx_writing_jobs_step (project_id, step),
   CONSTRAINT fk_writing_jobs_project
