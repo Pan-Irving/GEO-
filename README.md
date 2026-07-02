@@ -217,6 +217,45 @@ mysql -u geo_user -p geo_publishing < publishing\backend\sql\schema.mysql.sql
 
 注意：MySQL 只保存结构化数据。上传原文件、解析文件和导出文件仍在 `APP_DATA_DIR` 下。
 
+### MySQL 写入和运维优化
+
+MySQL 模式下，撰文项目保存采用增量同步：未变化的正文 `markdown`、结构化 `raw_json` 和步骤数据不会被重复删除再插入。发布工作台同步文章时也会跳过未变化的 `article_snapshots`，减少长文本写入、InnoDB 页分裂和 binlog 增长。
+
+如果是已经部署过的旧库，拉取新代码后建议补齐新增索引并刷新统计信息：
+
+```sql
+CREATE INDEX idx_writing_projects_deleted_updated ON geo_writing.writing_projects (deleted_at, updated_at);
+CREATE INDEX idx_writing_materials_project_created ON geo_writing.writing_materials (project_id, created_at);
+CREATE INDEX idx_custom_project_created ON geo_writing.writing_custom_sources (project_id, created_at);
+CREATE INDEX idx_writing_jobs_project_created ON geo_writing.writing_jobs (project_id, created_at);
+CREATE INDEX idx_article_active_project_name ON geo_publishing.article_snapshots (active, project_name, project_id);
+CREATE INDEX idx_article_project_active_sort ON geo_publishing.article_snapshots (project_id, active, keyword, article_type);
+CREATE INDEX idx_publication_article_created ON geo_publishing.publication_records (article_id, created_at);
+CREATE INDEX idx_publication_employee_article_created ON geo_publishing.publication_records (employee_id, article_id, created_at);
+
+ANALYZE TABLE
+  geo_writing.writing_projects,
+  geo_writing.writing_materials,
+  geo_writing.writing_custom_sources,
+  geo_writing.writing_steps,
+  geo_writing.writing_jobs,
+  geo_writing.writing_content_items,
+  geo_writing.writing_articles,
+  geo_writing.writing_matrix_import_drafts,
+  geo_writing.writing_logs,
+  geo_publishing.article_snapshots,
+  geo_publishing.assignments,
+  geo_publishing.publication_records,
+  geo_publishing.sessions,
+  geo_publishing.users;
+```
+
+如果索引已存在，MySQL 会提示重复索引名，跳过即可。单机开发环境没有主从复制时，可以把 binlog 保留期设置为 7 天：
+
+```sql
+SET GLOBAL binlog_expire_logs_seconds = 604800;
+```
+
 ## 发布状态联动
 
 撰文看板中的“已使用 / 采购中”来自发布库，只读查询 `PUBLISHING_DATABASE_URL` 指向的发布数据库。
