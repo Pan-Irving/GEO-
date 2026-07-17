@@ -1,0 +1,6 @@
+interface:
+  display_name: "思阳 GEO 内容执行流"
+  short_description: "自动读取资料并生成 GEO 规划、Brief 与正文"
+  default_prompt: "Use $mindsun-geo-content-flow to read the project materials, confirm the inferred inputs, then produce the GEO content plan, article brief, and final Markdown article."
+policy:
+  allow_implicit_invocation: true
